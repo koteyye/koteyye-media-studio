@@ -1,17 +1,61 @@
-import type { OpenRouterModel, VideoGenerateParams, VideoJobResult, VideoJobStatus, ImageGenerationResult } from '../shared/ipc-types';
+import type {
+  OpenRouterModel,
+  OpenRouterCapabilityDescriptor,
+  OpenRouterInputReference,
+  VideoGenerateParams,
+  VideoJobResult,
+  VideoJobStatus,
+  ImageGenerationResult,
+  ImageGenerateOptions,
+} from '../shared/ipc-types';
 
 const BASE_URL = 'https://openrouter.ai/api/v1';
 
-export async function fetchImageModels(apiKey: string): Promise<OpenRouterModel[]> {
-  const res = await fetch(`${BASE_URL}/models?output_modalities=image`, {
-    headers: { Authorization: `Bearer ${apiKey}` },
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Failed to fetch image models: ${res.status} - ${body}`);
+function enumValues(descriptor: OpenRouterCapabilityDescriptor | undefined): string[] | undefined {
+  if (descriptor && descriptor.type === 'enum' && Array.isArray(descriptor.values)) {
+    return descriptor.values;
   }
-  const json = await res.json();
-  return (json.data ?? []) as OpenRouterModel[];
+  return undefined;
+}
+
+export async function fetchImageModels(apiKey: string): Promise<OpenRouterModel[]> {
+  const headers = { Authorization: `Bearer ${apiKey}` };
+
+  const [imagesRes, legacyRes] = await Promise.allSettled([
+    fetch(`${BASE_URL}/images/models`, { headers }),
+    fetch(`${BASE_URL}/models?output_modalities=image`, { headers }),
+  ]);
+
+  const legacyModels = legacyRes.status === 'fulfilled' && legacyRes.value.ok
+    ? (((await legacyRes.value.json()) as { data?: OpenRouterModel[] }).data ?? [])
+    : null;
+
+  if (imagesRes.status === 'fulfilled' && imagesRes.value.ok) {
+    const json = (await imagesRes.value.json()) as { data?: OpenRouterModel[] };
+    const base = json.data ?? [];
+    if (base.length === 0 && legacyModels) return legacyModels;
+    const legacyById = new Map((legacyModels ?? []).map((m) => [m.id, m]));
+
+    return base.map((m) => {
+      const legacy = legacyById.get(m.id);
+      const params = m.supported_parameters ?? {};
+      return {
+        ...m,
+        architecture: m.architecture ?? legacy?.architecture,
+        pricing: legacy?.pricing,
+        supported_resolutions: enumValues(params.resolution) ?? m.supported_resolutions,
+        supported_aspect_ratios: enumValues(params.aspect_ratio) ?? m.supported_aspect_ratios,
+        supported_sizes: enumValues(params.size) ?? m.supported_sizes,
+      } as OpenRouterModel;
+    });
+  }
+
+  if (legacyModels) return legacyModels;
+
+  const reason = imagesRes.status === 'rejected'
+    ? String(imagesRes.reason)
+    : `Failed to fetch image models: ${imagesRes.value.status}`;
+  throw new Error(reason);
 }
 
 export async function fetchVideoModels(apiKey: string): Promise<OpenRouterModel[]> {
@@ -42,7 +86,6 @@ export async function generateVideo(
   }
   if (params.frame_images) body.frame_images = params.frame_images;
   if (params.input_references) body.input_references = params.input_references;
-  if (params.audio_ref) body.audio_ref = params.audio_ref;
 
   const res = await fetch(`${BASE_URL}/videos`, {
     method: 'POST',
@@ -64,35 +107,16 @@ export async function generateImage(
   apiKey: string,
   model: string,
   prompt: string,
-  imageUrl?: string,
-  options?: import('../shared/ipc-types').ImageGenerateOptions
+  references?: OpenRouterInputReference[],
+  options?: ImageGenerateOptions
 ): Promise<ImageGenerationResult> {
-  const content = imageUrl
-    ? [
-        { type: 'text', text: prompt },
-        { type: 'image_url', image_url: { url: imageUrl } }
-      ]
-    : prompt;
+  const body: Record<string, unknown> = { model, prompt };
+  if (references && references.length > 0) body.input_references = references;
+  if (options?.resolution) body.resolution = options.resolution;
+  if (options?.aspectRatio) body.aspect_ratio = options.aspectRatio;
+  if (options?.seed !== undefined) body.seed = options.seed;
 
-  // Определяем модальности: если модель поддерживает только image (например, Flux, Recraft)
-  // то отправляем ['image'], иначе ['image', 'text']
-  const outputModalities = options?.outputModalities ?? ['image', 'text'];
-
-  const body: Record<string, unknown> = {
-    model,
-    messages: [{ role: 'user', content }],
-    modalities: outputModalities,
-  };
-
-  if (options?.resolution || options?.aspectRatio || options?.seed !== undefined) {
-    const imageConfig: Record<string, unknown> = {};
-    if (options.resolution) imageConfig.image_size = options.resolution;
-    if (options.aspectRatio) imageConfig.aspect_ratio = options.aspectRatio;
-    if (options.seed !== undefined) imageConfig.seed = options.seed;
-    body.image_config = imageConfig;
-  }
-
-  const res = await fetch(`${BASE_URL}/chat/completions`, {
+  const res = await fetch(`${BASE_URL}/images`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -106,28 +130,18 @@ export async function generateImage(
   }
   const json = await res.json();
 
-  const urls: string[] = [];
-  const message = json.choices?.[0]?.message;
-  if (message) {
-    // Новый формат: message.images
-    if (Array.isArray(message.images)) {
-      for (const img of message.images) {
-        const url = img?.image_url?.url || img?.imageUrl?.url;
-        if (url) urls.push(url);
-      }
-    }
-    // Резервный формат: message.content как массив с image_url
-    if (urls.length === 0 && Array.isArray(message.content)) {
-      for (const part of message.content) {
-        if (part.type === 'image_url' && part.image_url?.url) {
-          urls.push(part.image_url.url);
-        }
-      }
-    }
-  }
+  const images = Array.isArray(json.data)
+    ? json.data
+        .filter((item: unknown): item is { b64_json: string; media_type?: string } =>
+          !!item && typeof (item as { b64_json?: unknown }).b64_json === 'string')
+        .map((item: { b64_json: string; media_type?: string }) => ({
+          b64_json: item.b64_json,
+          media_type: item.media_type,
+        }))
+    : [];
 
   return {
-    urls,
+    images,
     model: json.model ?? model,
     usage: json.usage,
   };

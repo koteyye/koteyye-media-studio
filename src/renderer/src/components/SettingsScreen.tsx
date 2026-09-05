@@ -3,7 +3,6 @@ import type { ReactNode } from 'react';
 import { useAppStore } from '../store';
 import { useT } from '../i18n/LanguageContext';
 import keyIcon from '../../../assets/icons/key.png';
-import imageIcon from '../../../assets/icons/image.png';
 import folderIcon from '../../../assets/icons/folder.png';
 import catLogo from '../../../assets/icons/dashboard_logo.png';
 import saveIcon from '../../../assets/icons/save.png';
@@ -29,7 +28,6 @@ function SettingsScreen(): JSX.Element {
   const t = useT();
   
   const [apiKey, setApiKey] = useState(store.apiKey);
-  const [imgbbApiKey, setImgbbApiKey] = useState(store.imgbbApiKey || '');
   const [localFolder, setLocalFolder] = useState(store.localFolder || '');
   
   const [showPassword, setShowPassword] = useState(false);
@@ -75,7 +73,6 @@ function SettingsScreen(): JSX.Element {
 
   async function handleSave() {
     const trimmedKey = apiKey.trim();
-    const trimmedImgbb = imgbbApiKey.trim();
     const trimmedFolder = localFolder.trim();
 
     if (!trimmedKey) {
@@ -93,7 +90,6 @@ function SettingsScreen(): JSX.Element {
     try {
       const saveResult = await window.electronAPI.setConfig({
         apiKey: trimmedKey,
-        imgbbApiKey: trimmedImgbb,
         localFolder: trimmedFolder,
       });
 
@@ -104,7 +100,6 @@ function SettingsScreen(): JSX.Element {
 
       // Update store
       store.setApiKey(trimmedKey);
-      store.setImgbbApiKey(trimmedImgbb);
       store.setLocalFolder(trimmedFolder);
 
       // Back to dashboard
@@ -169,30 +164,6 @@ function SettingsScreen(): JSX.Element {
             >
               <img src={viewIcon} alt="" style={{ width: '20px', height: '20px', objectFit: 'contain' }} />
             </button>
-          </div>
-        </div>
-
-        <div className="field">
-          <label>
-            {t('settings.imgbbOptionalLabel')}
-            <SettingsTooltip>
-              {t('settings.imgbbTooltip')}
-            </SettingsTooltip>
-            <span style={{ float: 'right', fontSize: '11px', fontWeight: 'normal' }}>
-              {t('settings.getKeyAt')} <a href="https://imgbb.com/" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)', textDecoration: 'none' }}>api.imgbb.com ↗</a>
-            </span>
-          </label>
-          <div className="input-with-icon">
-            <img src={imageIcon} className="input-icon" alt="" />
-            <input
-              type="text"
-              placeholder={t('settings.imgbbPlaceholder')}
-              value={imgbbApiKey}
-              onChange={(e) => setImgbbApiKey(e.target.value)}
-            />
-          </div>
-          <div className="field-meta">
-            {t('settings.imgbbFieldMeta')}
           </div>
         </div>
 
@@ -284,21 +255,6 @@ function SettingsScreen(): JSX.Element {
               </div>
               <div className={`status-indicator ${store.apiKey ? 'success' : 'pending'}`}>
                 {store.apiKey ? '✓' : '!'}
-              </div>
-            </div>
-
-            <div className="status-card">
-              <div className="status-left">
-                <img src={imageIcon} alt="" />
-                <div className="status-info">
-                  <div className="status-name">ImgBB API Key</div>
-                  <div className="status-desc">
-                    {store.imgbbApiKey ? t('settings.readyToUse') : t('settings.optional')}
-                  </div>
-                </div>
-              </div>
-              <div className={`status-indicator ${store.imgbbApiKey ? 'success' : 'pending'}`}>
-                {store.imgbbApiKey ? '✓' : '—'}
               </div>
             </div>
 

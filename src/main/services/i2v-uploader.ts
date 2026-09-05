@@ -1,38 +1,61 @@
-import { validateImage } from './image-validator';
-import { stripMetadata } from './image-stripper';
-import { uploadToTmpfiles } from './tmpfiles';
-import { verifyPublicImageUrl } from './url-verifier';
 import fs from 'fs';
+import path from 'path';
+import { validateImage } from './image-validator';
 import type { UploadedFrameImage } from '../../shared/ipc-types';
 
-export async function uploadFrameImage(filePath: string, imgbbApiKey?: string): Promise<UploadedFrameImage> {
-  console.log("[i2v-uploader] Validating image...", filePath);
+const MAX_AUDIO_SIZE = 30 * 1024 * 1024;
+const ALLOWED_AUDIO_EXTENSIONS = ['.mp3', '.wav', '.aac', '.m4a', '.ogg', '.flac'];
+
+const AUDIO_MIME_MAP: Record<string, string> = {
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.aac': 'audio/aac',
+  '.m4a': 'audio/x-m4a',
+  '.ogg': 'audio/ogg',
+  '.flac': 'audio/flac',
+};
+
+export async function loadFrameImage(filePath: string): Promise<UploadedFrameImage> {
   const validation = validateImage(filePath);
   if (!validation.valid) throw new Error(validation.error);
 
-  console.log("[i2v-uploader] Stripping metadata...");
-  const cleanedPath = await stripMetadata(filePath);
-  let url: string;
-
-  try {
-    console.log("[i2v-uploader] Uploading image to cloud...");
-    url = await uploadToTmpfiles(cleanedPath, imgbbApiKey);
-    console.log("[i2v-uploader] Uploaded URL:", url);
-  } finally {
-    if (fs.existsSync(cleanedPath)) fs.unlinkSync(cleanedPath);
-  }
-
-  console.log("[i2v-uploader] Verifying URL availability...");
-  await verifyPublicImageUrl(url);
-  console.log("[i2v-uploader] Verified successfully!");
+  const buffer = fs.readFileSync(filePath);
+  const url = `data:${validation.mimeType};base64,${buffer.toString('base64')}`;
 
   return {
     frameType: 'first_frame',
-    provider: imgbbApiKey ? 'catbox' : 'tmpfiles', // Use 'catbox' for type compatibility with shared types
     url,
     originalFileName: validation.fileName,
     mimeType: validation.mimeType,
     sizeBytes: validation.sizeBytes,
-    uploadedAt: new Date().toISOString(),
+    readAt: new Date().toISOString(),
+  };
+}
+
+export async function loadAudioReference(filePath: string): Promise<UploadedFrameImage> {
+  const fileName = path.basename(filePath);
+  if (!fs.existsSync(filePath)) {
+    throw new Error('File does not exist');
+  }
+  const stat = fs.statSync(filePath);
+  if (stat.size > MAX_AUDIO_SIZE) {
+    throw new Error(`File too large (${(stat.size / 1024 / 1024).toFixed(1)} MB). Maximum: 30 MB`);
+  }
+  const ext = path.extname(fileName).toLowerCase();
+  if (!ALLOWED_AUDIO_EXTENSIONS.includes(ext)) {
+    throw new Error(`Unsupported audio format: ${ext}`);
+  }
+
+  const buffer = fs.readFileSync(filePath);
+  const mimeType = AUDIO_MIME_MAP[ext] || 'audio/mpeg';
+  const url = `data:${mimeType};base64,${buffer.toString('base64')}`;
+
+  return {
+    frameType: 'first_frame',
+    url,
+    originalFileName: fileName,
+    mimeType,
+    sizeBytes: stat.size,
+    readAt: new Date().toISOString(),
   };
 }

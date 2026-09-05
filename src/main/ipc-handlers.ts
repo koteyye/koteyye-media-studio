@@ -13,11 +13,17 @@ import {
   downloadVideoContent,
   fetchCredits,
 } from './openrouter';
-import { uploadFrameImage } from './services/i2v-uploader';
+import { loadFrameImage, loadAudioReference } from './services/i2v-uploader';
 import * as historyStore from './services/history-store';
-import { uploadToTmpfiles } from './services/tmpfiles';
-import { verifyPublicImageUrl } from './services/url-verifier';
-import type { AppConfig, IpcResult, MediaType, OpenRouterFrameImage, GenerationHistoryItem } from '../shared/ipc-types';
+import type {
+  AppConfig,
+  IpcResult,
+  MediaType,
+  OpenRouterFrameImage,
+  OpenRouterInputReference,
+  UploadedFrameImage,
+  ImageGenerateOptions,
+} from '../shared/ipc-types';
 
 export const configStore = new Store<AppConfig>({
   defaults: {
@@ -26,7 +32,6 @@ export const configStore = new Store<AppConfig>({
     mediaType: '',
     selectedModel: '',
     i2vSelectedModel: '',
-    imgbbApiKey: '',
     localFolder: '',
     selectedModelT2I: '',
     selectedModelI2I: '',
@@ -62,12 +67,19 @@ async function wrapAsync<T>(fn: () => Promise<T>): Promise<IpcResult<T>> {
   }
 }
 
-async function downloadImageContent(url: string, outputPath: string): Promise<string> {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Image download failed: ${res.status}`);
-  const buffer = await res.arrayBuffer();
-  fs.writeFileSync(outputPath, Buffer.from(buffer));
-  return outputPath;
+function extFromMediaType(mediaType: string | undefined): string {
+  switch ((mediaType ?? '').split(';')[0]) {
+    case 'image/jpeg': return 'jpg';
+    case 'image/webp': return 'webp';
+    case 'image/svg+xml': return 'svg';
+    case 'image/gif': return 'gif';
+    default: return 'png';
+  }
+}
+
+function stripFrameDataUrl(frame?: UploadedFrameImage | null): UploadedFrameImage | undefined {
+  if (!frame) return undefined;
+  return { ...frame, url: '' };
 }
 
 
@@ -94,48 +106,6 @@ function resolveSavedFilePath(filePath: string): string {
   return safePath;
 }
 
-async function uploadAudioFile(filePath: string): Promise<UploadedFrameImage> {
-  const fileName = path.basename(filePath);
-  if (!fs.existsSync(filePath)) {
-    throw new Error('File does not exist');
-  }
-  const stat = fs.statSync(filePath);
-  const MAX_AUDIO_SIZE = 30 * 1024 * 1024; // 30 MB
-  if (stat.size > MAX_AUDIO_SIZE) {
-    throw new Error(`File too large (${(stat.size / 1024 / 1024).toFixed(1)} MB). Maximum: 30 MB`);
-  }
-  const ext = path.extname(fileName).toLowerCase();
-  const allowedAudioExts = ['.mp3', '.wav', '.aac', '.m4a', '.ogg', '.flac'];
-  if (!allowedAudioExts.includes(ext)) {
-    throw new Error(`Unsupported audio format: ${ext}`);
-  }
-
-  const mimeMap: Record<string, string> = {
-    '.mp3': 'audio/mpeg',
-    '.wav': 'audio/wav',
-    '.aac': 'audio/aac',
-    '.m4a': 'audio/x-m4a',
-    '.ogg': 'audio/ogg',
-    '.flac': 'audio/flac',
-  };
-
-  console.log("[audio-uploader] Uploading audio to Piximg...", filePath);
-  const url = await uploadToTmpfiles(filePath); // Всегда без ImgBB ключа, чтобы грузить на Piximg
-
-  console.log("[audio-uploader] Verifying URL...", url);
-  await verifyPublicImageUrl(url);
-
-  return {
-    frameType: 'first_frame', // Совместимость с типом
-    provider: 'tmpfiles',
-    url,
-    originalFileName: fileName,
-    mimeType: mimeMap[ext] || 'audio/mpeg',
-    sizeBytes: stat.size,
-    uploadedAt: new Date().toISOString(),
-  };
-}
-
 export function registerIpcHandlers(): void {
   ipcMain.handle('config:get', () => wrap(() => ({
     apiKey: configStore.get('apiKey'),
@@ -143,7 +113,6 @@ export function registerIpcHandlers(): void {
     mediaType: configStore.get('mediaType'),
     selectedModel: configStore.get('selectedModel'),
     i2vSelectedModel: configStore.get('i2vSelectedModel'),
-    imgbbApiKey: configStore.get('imgbbApiKey'),
     localFolder: configStore.get('localFolder') ?? '',
     selectedModelT2I: configStore.get('selectedModelT2I') ?? '',
     selectedModelI2I: configStore.get('selectedModelI2I') ?? '',
@@ -153,7 +122,7 @@ export function registerIpcHandlers(): void {
   })));
 
   ipcMain.handle('config:set', (_e, partial: Partial<AppConfig>) => wrap(() => {
-    const keys: (keyof AppConfig)[] = ['apiKey', 'generationMode', 'mediaType', 'selectedModel', 'i2vSelectedModel', 'imgbbApiKey', 'localFolder', 'selectedModelT2I', 'selectedModelI2I', 'selectedModelI2V', 'selectedModelT2V', 'lang'];
+    const keys: (keyof AppConfig)[] = ['apiKey', 'generationMode', 'mediaType', 'selectedModel', 'i2vSelectedModel', 'localFolder', 'selectedModelT2I', 'selectedModelI2I', 'selectedModelI2V', 'selectedModelT2V', 'lang'];
     for (const k of keys) {
       if (partial[k] !== undefined) configStore.set(k, partial[k] as never);
     }
@@ -234,25 +203,32 @@ export function registerIpcHandlers(): void {
   }));
 
   // ---- Text-to-Image / Image-to-Image ----
-  ipcMain.handle('image:generate', async (_e, prompt: string, imageUrl?: string, options?: import('../shared/ipc-types').ImageGenerateOptions) => wrapAsync(async () => {
+  ipcMain.handle('image:generate', async (_e, prompt: string, imageUrl?: string, options?: ImageGenerateOptions) => wrapAsync(async () => {
     const apiKey = requireApiKey();
     const model = configStore.get('selectedModel');
     if (!model) throw new Error('No model selected');
     const safePrompt = promptSchema.parse(prompt);
 
-    const result = await generateImage(apiKey, model, safePrompt, imageUrl, options);
+    const references: OpenRouterInputReference[] | undefined = imageUrl
+      ? [{ type: 'image_url', image_url: { url: imageUrl } }]
+      : undefined;
+
+    const result = await generateImage(apiKey, model, safePrompt, references, options);
 
     const localFolder = configStore.get('localFolder');
     const localPaths: string[] = [];
-    if (localFolder && fs.existsSync(localFolder) && result.urls?.length) {
-      try {
-        const filename = `image-${Date.now()}.png`;
-        const outputPath = path.join(localFolder, filename);
-        await downloadImageContent(result.urls[0], outputPath);
-        localPaths.push(outputPath);
-      } catch (err) {
-        console.error("Auto-download image failed:", err);
-      }
+    if (localFolder && fs.existsSync(localFolder)) {
+      result.images.forEach((image, index) => {
+        try {
+          const suffix = result.images.length > 1 ? `-${index + 1}` : '';
+          const filename = `image-${Date.now()}${suffix}.${extFromMediaType(image.media_type)}`;
+          const outputPath = path.join(localFolder, filename);
+          fs.writeFileSync(outputPath, Buffer.from(image.b64_json, 'base64'));
+          localPaths.push(outputPath);
+        } catch (err) {
+          console.error("Auto-save image failed:", err);
+        }
+      });
     }
 
     historyStore.create({
@@ -260,7 +236,7 @@ export function registerIpcHandlers(): void {
       model,
       prompt: safePrompt,
       status: 'completed',
-      remoteUrls: result.urls,
+      remoteUrls: [],
       localPaths,
       usage: result.usage,
     });
@@ -276,8 +252,7 @@ export function registerIpcHandlers(): void {
   }));
 
   ipcMain.handle('i2v:upload-image', async (_e, filePath: string) => wrapAsync(async () => {
-    const imgbbApiKey = configStore.get('imgbbApiKey');
-    return await uploadFrameImage(filePath, imgbbApiKey);
+    return await loadFrameImage(filePath);
   }));
 
   ipcMain.handle('i2v:generate', async (_e, input) => wrapAsync(async () => {
@@ -304,14 +279,15 @@ export function registerIpcHandlers(): void {
       frame_images: frameImages,
     };
 
+    const inputReferences: OpenRouterInputReference[] = [];
     if (refImage) {
-      body.input_references = [
-        { type: 'image_url', image_url: { url: refImage.url } }
-      ];
+      inputReferences.push({ type: 'image_url', image_url: { url: refImage.url } });
     }
-
     if (audioRef) {
-      body.audio_ref = audioRef.url;
+      inputReferences.push({ type: 'audio_url', audio_url: { url: audioRef.url } });
+    }
+    if (inputReferences.length > 0) {
+      body.input_references = inputReferences;
     }
 
     if (input.resolution) body.resolution = input.resolution;
@@ -349,8 +325,8 @@ export function registerIpcHandlers(): void {
       duration: input.duration,
       generateAudio: input.generateAudio,
       seed: input.seed,
-      firstFrame,
-      lastFrame,
+      firstFrame: stripFrameDataUrl(firstFrame),
+      lastFrame: stripFrameDataUrl(lastFrame),
     });
 
     return { id: json.id, polling_url: json.polling_url };
@@ -463,7 +439,7 @@ export function registerIpcHandlers(): void {
   });
 
   ipcMain.handle('audio:upload', async (_e, filePath: string) => wrapAsync(async () => {
-    return await uploadAudioFile(filePath);
+    return await loadAudioReference(filePath);
   }));
 
   ipcMain.handle('file:open', async (_e, filePath: string) => wrapAsync(async () => {

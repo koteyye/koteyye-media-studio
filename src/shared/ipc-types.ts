@@ -6,6 +6,11 @@ export interface IpcResult<T = unknown> {
 
 export type MediaType = 'image' | 'video';
 
+export type OpenRouterCapabilityDescriptor =
+  | { type: 'enum'; values: string[] }
+  | { type: 'range'; min: number; max: number }
+  | { type: 'boolean' };
+
 export interface OpenRouterModel {
   id: string;
   name: string;
@@ -28,6 +33,9 @@ export interface OpenRouterModel {
     internal_reasoning?: string;
     [key: string]: string | undefined;
   };
+  supported_parameters?: Record<string, OpenRouterCapabilityDescriptor>;
+  supports_streaming?: boolean;
+  endpoints?: string;
   context_length?: number;
   supported_resolutions?: string[];
   supported_aspect_ratios?: string[];
@@ -40,16 +48,15 @@ export interface OpenRouterModel {
   allowed_passthrough_parameters?: string[];
 }
 
-export interface OpenRouterInputReference {
-  type: 'image_url';
-  image_url: { url: string };
-}
+export type OpenRouterInputReference =
+  | { type: 'image_url'; image_url: { url: string } }
+  | { type: 'audio_url'; audio_url: { url: string } }
+  | { type: 'video_url'; video_url: { url: string } };
 
 export interface VideoGenerateParams {
   prompt: string;
   frame_images?: OpenRouterFrameImage[];
   input_references?: OpenRouterInputReference[];
-  audio_ref?: string;
   resolution?: string;
   aspect_ratio?: string;
   size?: string;
@@ -84,16 +91,21 @@ export interface ImageGenerateOptions {
   resolution?: string;
   aspectRatio?: string;
   seed?: number;
-  outputModalities?: string[];
+}
+
+export interface GeneratedImage {
+  b64_json: string;
+  media_type?: string;
 }
 
 export interface ImageGenerationResult {
-  urls: string[];
+  images: GeneratedImage[];
   model: string;
   usage?: {
     cost?: number;
     [key: string]: unknown;
   };
+  localPaths?: string[];
 }
 
 export type AppConfig = {
@@ -102,7 +114,6 @@ export type AppConfig = {
   mediaType: MediaType | '';
   selectedModel: string;
   i2vSelectedModel: string;
-  imgbbApiKey?: string;
   localFolder: string;
   // Per-tab model selections
   selectedModelT2I: string;
@@ -142,12 +153,11 @@ export interface GenerationHistoryItem {
 
 export interface UploadedFrameImage {
   frameType: 'first_frame' | 'last_frame';
-  provider: 'catbox' | 'tmpfiles';
   url: string;
   originalFileName: string;
   mimeType: string;
   sizeBytes: number;
-  uploadedAt: string;
+  readAt: string;
 }
 
 export interface I2VGenerateInput {

@@ -45,7 +45,6 @@ function AppInner(): JSX.Element {
       if (result.success && result.data) {
         const config = result.data;
         store.setApiKey(config.apiKey || '');
-        store.setImgbbApiKey(config.imgbbApiKey || '');
         store.setLocalFolder(config.localFolder || '');
         store.setLang(config.lang === 'en' ? 'en' : 'ru');
         

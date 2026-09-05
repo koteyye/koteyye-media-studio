@@ -16,8 +16,7 @@ interface AppState {
   i2vModels: OpenRouterModel[];
   i2vSelectedModel: string;
   i2vSelectedModelData: OpenRouterModel | null;
-  
-  imgbbApiKey: string;
+
   localFolder: string;
 
   loading: boolean;
@@ -40,7 +39,6 @@ interface AppState {
   setModels: (models: OpenRouterModel[]) => void;
   setI2vModels: (models: OpenRouterModel[]) => void;
   setI2vSelectedModel: (model: string, modelData?: OpenRouterModel) => void;
-  setImgbbApiKey: (key: string) => void;
   setLocalFolder: (folder: string) => void;
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
@@ -63,8 +61,7 @@ export const useAppStore = create<AppState>((set) => ({
   i2vModels: [],
   i2vSelectedModel: '',
   i2vSelectedModelData: null,
-  
-  imgbbApiKey: '',
+
   localFolder: '',
 
   loading: false,
@@ -88,7 +85,6 @@ export const useAppStore = create<AppState>((set) => ({
   setI2vModels: (i2vModels) => set({ i2vModels }),
   setI2vSelectedModel: (i2vSelectedModel, i2vSelectedModelData) =>
     set({ i2vSelectedModel, i2vSelectedModelData: i2vSelectedModelData ?? null }),
-  setImgbbApiKey: (imgbbApiKey) => set({ imgbbApiKey }),
   setLocalFolder: (localFolder) => set({ localFolder }),
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
@@ -99,7 +95,7 @@ export const useAppStore = create<AppState>((set) => ({
   reset: () =>
     set({
       step: 'config', apiKey: '', generationMode: '', mediaType: '', selectedModel: '', selectedModelData: null,
-      models: [], i2vModels: [], i2vSelectedModel: '', i2vSelectedModelData: null, imgbbApiKey: '', localFolder: '', loading: false, error: null,
+      models: [], i2vModels: [], i2vSelectedModel: '', i2vSelectedModelData: null, localFolder: '', loading: false, error: null,
       activeTab: 'image-to-video', showSettings: false, credits: null, lang: 'ru',
     }),
 }));

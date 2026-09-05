@@ -3,7 +3,7 @@ import { useAppStore } from '../store';
 import { useT } from '../i18n/LanguageContext';
 import { getPricingSkuKey } from '../i18n/translations';
 import { usePolling } from '../hooks/usePolling';
-import type { OpenRouterModel, GenerationHistoryItem, VideoJobStatus, UploadedFrameImage } from '../../../shared/ipc-types';
+import type { OpenRouterModel, OpenRouterInputReference, GenerationHistoryItem, VideoJobStatus, UploadedFrameImage } from '../../../shared/ipc-types';
 import type { LangKey } from '../i18n/translations';
 
 import textToImgIcon from '../../../assets/icons/mode_text_to_image.png';
@@ -546,21 +546,16 @@ function Dashboard(): JSX.Element {
         // Sync API Key in Electron ConfigStore
         await window.electronAPI.setConfig({ selectedModel: selectedModelId, mediaType: 'image' });
 
-        // Определяем модальности на основе output_modalities модели
-        const outputModalities = selectedModelData?.architecture?.output_modalities ?? ['image', 'text'];
-        const isImageOnly = outputModalities.length === 1 && outputModalities[0] === 'image';
-
         const options = {
           resolution: resolution || undefined,
           aspectRatio: aspectRatio || undefined,
           seed: seed ? Number(seed) : undefined,
-          outputModalities: isImageOnly ? ['image'] : ['image', 'text'],
         };
 
         const res = await window.electronAPI.generateImage(prompt.trim(), undefined, options);
         if (res.success && res.data) {
-          setActiveResultUrls(res.data.urls);
-          setActiveLocalPaths((res.data as any).localPaths ?? []);
+          setActiveResultUrls(res.data.localPaths ?? []);
+          setActiveLocalPaths(res.data.localPaths ?? []);
           setGenState('completed');
           loadHistory();
           store.refreshCredits?.();
@@ -577,20 +572,16 @@ function Dashboard(): JSX.Element {
       try {
         await window.electronAPI.setConfig({ selectedModel: selectedModelId, mediaType: 'image' });
 
-        const outputModalities = selectedModelData?.architecture?.output_modalities ?? ['image', 'text'];
-        const isImageOnly = outputModalities.length === 1 && outputModalities[0] === 'image';
-
         const options = {
           resolution: resolution || undefined,
           aspectRatio: aspectRatio || undefined,
           seed: seed ? Number(seed) : undefined,
-          outputModalities: isImageOnly ? ['image'] : ['image', 'text'],
         };
 
         const res = await window.electronAPI.generateImage(prompt.trim(), firstFrame!.url, options);
         if (res.success && res.data) {
-          setActiveResultUrls(res.data.urls);
-          setActiveLocalPaths((res.data as any).localPaths ?? []);
+          setActiveResultUrls(res.data.localPaths ?? []);
+          setActiveLocalPaths(res.data.localPaths ?? []);
           setGenState('completed');
           loadHistory();
           store.refreshCredits?.();
@@ -637,6 +628,9 @@ function Dashboard(): JSX.Element {
       setActiveMediaType('video');
       try {
         await window.electronAPI.setConfig({ selectedModel: selectedModelId, mediaType: 'video' });
+        const t2vReferences: OpenRouterInputReference[] = [];
+        if (refImage) t2vReferences.push({ type: 'image_url', image_url: { url: refImage.url } });
+        if (audioRef) t2vReferences.push({ type: 'audio_url', audio_url: { url: audioRef.url } });
         const res = await window.electronAPI.generateVideo({
           prompt: prompt.trim(),
           resolution: resolution || undefined,
@@ -644,8 +638,7 @@ function Dashboard(): JSX.Element {
           duration: duration ? Number(duration) : undefined,
           generate_audio: supportsAudio ? generateAudio : undefined,
           seed: seed ? Number(seed) : undefined,
-          input_references: refImage ? [{ type: 'image_url', image_url: { url: refImage.url } }] : undefined,
-          audio_ref: audioRef ? audioRef.url : undefined,
+          input_references: t2vReferences.length > 0 ? t2vReferences : undefined,
         });
 
         if (res.success && res.data) {
@@ -669,7 +662,6 @@ function Dashboard(): JSX.Element {
     if (result.success && result.data) {
       store.setApiKey(result.data.apiKey);
       store.setLocalFolder(result.data.localFolder);
-      store.setImgbbApiKey(result.data.imgbbApiKey || '');
     }
   }
 

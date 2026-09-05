@@ -12,8 +12,6 @@ export type LangKey =
   | 'settings.title'
   | 'settings.subtitle'
   | 'settings.getKeyAt'
-  | 'settings.imgbbPlaceholder'
-  | 'settings.imgbbHint'
   | 'settings.localFolderLabel'
   | 'settings.folderPlaceholder'
   | 'settings.selectFolder'
@@ -35,22 +33,14 @@ export type LangKey =
   | 'settings.apiKeyConnected'
   | 'settings.readyToUse'
   | 'settings.keyRequired'
-  | 'settings.optional'
   | 'settings.resultsFolder'
   | 'settings.folderSelected'
   | 'settings.pathRequired'
-  | 'settings.whyNeededTitle'
-  | 'settings.whyApiKey'
-  | 'settings.whyImgbb'
-  | 'settings.whyLocalFolder'
   | 'settings.authorContacts'
   | 'settings.apiKeyTooltip'
-  | 'settings.imgbbTooltip'
-  | 'settings.imgbbFieldMeta'
   | 'settings.localFolderTooltip'
   | 'settings.telegramChannel'
   | 'settings.website'
-  | 'settings.imgbbOptionalLabel'
 
   // Dashboard.tsx — general
   | 'dashboard.settingsTitle'
@@ -124,7 +114,6 @@ export type LangKey =
   | 'dashboard.mode'
   | 'dashboard.status'
   | 'dashboard.seconds'
-  | 'dashboard.previewUnavailable'
   | 'dashboard.textToImage'
   | 'dashboard.imageToImage'
   | 'dashboard.textToVideo'
@@ -163,7 +152,8 @@ export type LangKey =
   | 'pricing.perImage'
   | 'pricing.perRequest'
   | 'pricing.perInputToken'
-  | 'pricing.perOutputToken';
+  | 'pricing.perOutputToken'
+  | 'pricing.perImageToken';
 
 export type Lang = 'ru' | 'en';
 
@@ -181,8 +171,6 @@ export const translations: Record<LangKey, Record<Lang, string>> = {
   'settings.title':               { ru: 'Настройки',                                    en: 'Settings' },
   'settings.subtitle':            { ru: 'Подключение и сохранение результатов',          en: 'Connection and result saving' },
   'settings.getKeyAt':            { ru: 'Получить ключ можно на',                        en: 'Get your key at' },
-  'settings.imgbbPlaceholder':    { ru: 'Получите бесплатный ключ на api.imgbb.com',     en: 'Get a free key at api.imgbb.com' },
-  'settings.imgbbHint':           { ru: 'Рекомендуется для автоматической загрузки кадров и стабильной работы в России без VPN.', en: 'Recommended for automatic frame uploads and stable work in Russia without VPN.' },
   'settings.localFolderLabel':    { ru: 'Локальная папка для результатов *',             en: 'Local folder for results *' },
   'settings.folderPlaceholder':   { ru: 'Путь к папке сохранения результатов...',        en: 'Path to results save folder...' },
   'settings.selectFolder':        { ru: 'Выбрать папку',                                 en: 'Select folder' },
@@ -204,22 +192,14 @@ export const translations: Record<LangKey, Record<Lang, string>> = {
   'settings.apiKeyConnected':     { ru: 'API Key подключён',                             en: 'API Key connected' },
   'settings.readyToUse':          { ru: 'Готово к использованию',                        en: 'Ready to use' },
   'settings.keyRequired':         { ru: 'Требуется ввод ключа',                          en: 'Key input required' },
-  'settings.optional':            { ru: 'Необязательно',                                 en: 'Optional' },
   'settings.resultsFolder':       { ru: 'Папка результатов',                             en: 'Results folder' },
   'settings.folderSelected':      { ru: 'Папка выбрана',                                 en: 'Folder selected' },
   'settings.pathRequired':        { ru: 'Требуется выбрать путь',                        en: 'Path selection required' },
-  'settings.whyNeededTitle':      { ru: '💡 Зачем нужны эти настройки?',                  en: '💡 Why are these settings needed?' },
-  'settings.whyApiKey':           { ru: 'API Key используется для авторизации и оплаты генераций на платформе OpenRouter.', en: 'API Key is used for authorization and payment of generations on the OpenRouter platform.' },
-  'settings.whyImgbb':            { ru: 'ImgBB Key помогает напрямую заливать промежуточные картинки (первый/последний кадр) на надежный хостинг для бесперебойной работы на территории РФ без VPN.', en: 'ImgBB Key helps directly upload intermediate images (first/last frame) to reliable hosting for uninterrupted operation in Russia without VPN.' },
-  'settings.whyLocalFolder':      { ru: 'Локальная папка сохраняет ваши шедевры прямо на жесткий диск для удобного просмотра и мгновенного открытия!', en: 'Local folder saves your masterpieces directly to your hard drive for convenient viewing and instant access!' },
   'settings.authorContacts':     { ru: 'Контакты автора',                                en: 'Author contacts' },
   'settings.apiKeyTooltip':     { ru: 'API Key используется для авторизации запросов и оплаты генераций на платформе OpenRouter.', en: 'API Key is used for authorization of requests and payment for generations on the OpenRouter platform.' },
-  'settings.imgbbTooltip':      { ru: 'ImgBB Key нужен для генерации по референсам: OpenRouter принимает референс-кадры и изображения как URL, поэтому приложение загружает локальный файл на хостинг и передает модели ссылку.', en: 'ImgBB Key is needed for reference-based generation: OpenRouter accepts reference frames and images as URLs, so the app uploads the local file to hosting and passes the link to the model.' },
-  'settings.imgbbFieldMeta':    { ru: 'Нужен для режимов с референсами: OpenRouter требует URL изображения, поэтому приложение загружает выбранный локальный файл на ImgBB и передает ссылку модели. Это позволяет делать изображения и видео по исходной картинке или первому кадру.', en: 'Needed for reference modes: OpenRouter requires an image URL, so the app uploads the selected local file to ImgBB and passes the link to the model. This enables generating images and videos from a source image or first frame.' },
   'settings.localFolderTooltip':{ ru: 'Локальная папка хранит сгенерированные изображения и видео на вашем компьютере, чтобы их можно было быстро открыть или найти в проводнике.', en: 'Local folder stores generated images and videos on your computer so you can quickly open or find them in file explorer.' },
   'settings.telegramChannel':   { ru: 'Telegram канал: ',                               en: 'Telegram channel: ' },
   'settings.website':              { ru: 'Сайт: ',                                          en: 'Website: ' },
-  'settings.imgbbOptionalLabel':  { ru: 'ImgBB API Key (необязательно)',                    en: 'ImgBB API Key (optional)' },
 
   // Dashboard.tsx
   'dashboard.settingsTitle':      { ru: 'Настройки генерации',                           en: 'Generation settings' },
@@ -293,7 +273,6 @@ export const translations: Record<LangKey, Record<Lang, string>> = {
   'dashboard.mode':                { ru: 'Режим:',                                        en: 'Mode:' },
   'dashboard.status':              { ru: 'Статус:',                                       en: 'Status:' },
   'dashboard.seconds':             { ru: 'секунд',                                        en: 'seconds' },
-  'dashboard.previewUnavailable':  { ru: 'Нет превью',                                    en: 'No preview' },
   'dashboard.textToImage':         { ru: 'Текст в изображение',                            en: 'Text-to-Image' },
   'dashboard.imageToImage':        { ru: 'Изображение в изображение',                      en: 'Image-to-Image' },
   'dashboard.textToVideo':         { ru: 'Текст в видео',                                  en: 'Text-to-Video' },
@@ -331,8 +310,9 @@ export const translations: Record<LangKey, Record<Lang, string>> = {
   'pricing.perVideoTokenWithoutAudio':{ ru: 'за видео-токен (без аудио)',          en: 'per video token (without audio)' },
   'pricing.perImage':                 { ru: 'за изображение',                     en: 'per image' },
   'pricing.perRequest':               { ru: 'за запрос',                          en: 'per request' },
-  'pricing.perInputToken':            { ru: 'за входной токен',                   en: 'per input token' },
-  'pricing.perOutputToken':           { ru: 'за выходной токен',                  en: 'per output token' },
+  'pricing.perInputToken':            { ru: 'за входной токен',                 en: 'per input token' },
+  'pricing.perOutputToken':           { ru: 'за выходной токен',                en: 'per output token' },
+  'pricing.perImageToken':            { ru: 'за токен изображения',             en: 'per image token' },
 };
 
 export function getPricingSkuKey(apiPricingKey: string): LangKey | null {
@@ -362,6 +342,8 @@ export function getPricingSkuKey(apiPricingKey: string): LangKey | null {
     case 'request':                                 return 'pricing.perRequest';
     case 'prompt':                                  return 'pricing.perInputToken';
     case 'completion':                              return 'pricing.perOutputToken';
+    case 'image_token':
+    case 'image_output':                            return 'pricing.perImageToken';
     default: return null;
   }
 }
