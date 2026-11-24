@@ -2931,6 +2931,7 @@ dependencies = [
 name = "km-core"
 version = "2.0.0"
 dependencies = [
+ "base64 0.23.1",
  "km-shared",
  "reqwest 0.13.5",
  "serde",

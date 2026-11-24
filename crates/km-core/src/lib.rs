@@ -3,12 +3,16 @@
 //! [`CiClient`] выполняет запросы к API CI и разбирает ошибки в [`CoreError`].
 //! Каталог моделей ([`CiClient::public_models`], [`CiClient::models`]) кэшируется
 //! в [`CatalogCache`] и фильтруется по виду медиа ([`by_kind`]) и режиму
-//! генерации ([`for_mode`]). Методы генерации появятся в последующих задачах.
+//! генерации ([`for_mode`]). Изображения генерируются и редактируются
+//! ([`CiClient::generate_image`], [`CiClient::edit_image`]), байты результата
+//! даёт [`image_bytes`]. Аудио и видео появятся в последующих задачах.
 
 mod catalog;
 mod client;
 mod error;
+mod images;
 
 pub use catalog::{CatalogCache, by_kind, for_mode};
 pub use client::CiClient;
 pub use error::CoreError;
+pub use images::image_bytes;

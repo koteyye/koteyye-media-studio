@@ -118,6 +118,31 @@ impl CiClient {
         decode(response, path).await
     }
 
+    /// Скачивает байты по signed URL без заголовка `Authorization`.
+    ///
+    /// Signed URL уже содержит токен доступа в query-параметрах, поэтому
+    /// ключ CI в такой запрос не подставляется и не утекает в хранилище
+    /// файлов. URL абсолютный; базовый URL клиента не используется.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::Http`] при неуспешном статусе, [`CoreError::Timeout`] /
+    /// [`CoreError::Network`] при сбое транспорта.
+    pub async fn download(&self, url: &str) -> Result<Vec<u8>, CoreError> {
+        let response = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(map_transport_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(http_error(status, url, response).await);
+        }
+        let bytes = response.bytes().await.map_err(map_transport_error)?;
+        Ok(bytes.to_vec())
+    }
+
     /// Склеивает базовый URL и путь без двойных слешей.
     fn url(&self, path: &str) -> String {
         format!("{}/{}", self.base, path.trim_start_matches('/'))

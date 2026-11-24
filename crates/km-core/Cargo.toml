@@ -7,6 +7,9 @@ license.workspace = true
 
 [dependencies]
 km-shared = { version = "2.0.0", path = "../km-shared" }
+# base64 без simd-unsafe: скалярного движка достаточно для картинок,
+# unsafe SIMD-код в зависимости не нужен.
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 # reqwest 0.13: TLS по умолчанию — rustls (без системного OpenSSL),
 # system-proxy в дефолтных фичах читает системные прокси macOS.
 reqwest = { version = "0.13.5", features = ["json"] }
