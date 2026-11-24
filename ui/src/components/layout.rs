@@ -23,6 +23,7 @@ pub fn Layout() -> Element {
     let loading_label = use_t("common.loading");
     let spend_label = use_t("common.spend");
     let error_label = use_t("common.error");
+    let close_label = use_t("common.close");
 
     let error = (state.error)();
     let balance = (state.balance)();
@@ -80,7 +81,16 @@ pub fn Layout() -> Element {
             }
             main { class: "content",
                 if let Some(message) = error {
-                    div { class: "error-banner", {error_label} ": {message}" }
+                    div { class: "error-banner",
+                        span { class: "error-banner-text", {error_label} ": {message}" }
+                        button {
+                            class: "banner-dismiss",
+                            title: close_label,
+                            aria_label: close_label,
+                            onclick: move |_| state.set_error(None),
+                            "✕"
+                        }
+                    }
                 }
                 Outlet::<Route> {}
             }

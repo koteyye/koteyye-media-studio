@@ -43,7 +43,11 @@ pub struct AppState {
     pub balance: Signal<Option<BalanceView>>,
     /// Глобальная загрузка (инициализация приложения).
     pub busy: Signal<bool>,
-    /// Последняя ошибка IPC для показа в интерфейсе.
+    /// Последняя ошибка IPC для баннера в интерфейсе.
+    ///
+    /// Семантика «последняя операция»: успешная IPC-операция очищает сигнал
+    /// (`None`), отказ — записывает причину. Баннер также закрывается вручную
+    /// (кнопка в [`crate::components::layout::Layout`]).
     pub error: Signal<Option<String>>,
 }
 
@@ -88,6 +92,14 @@ impl AppState {
         spawn_local(async move { self.load().await });
     }
 
+    /// Записывает ошибку IPC в баннер; `None` очищает его.
+    ///
+    /// Приём `mut self` (AppState — Copy) позволяет вызывать из событийных
+    /// обработчиков без мутабельной привязки состояния в компоненте.
+    pub fn set_error(mut self, error: Option<String>) {
+        self.error.set(error);
+    }
+
     /// Применяет настройки к сигналам состояния (без записи в SQLite).
     pub fn apply_settings(mut self, settings: Settings) {
         self.lang.set(settings.lang);
@@ -95,13 +107,33 @@ impl AppState {
         self.settings.set(settings);
     }
 
-    /// Сохраняет настройки через IPC и применяет их к сигналам при успехе.
+    /// Сохраняет настройки через IPC: оптимистичное применение и откат при ошибке.
     ///
-    /// Ошибка записи попадает в сигнал `error`, сигналы не меняются.
-    pub async fn persist_settings(mut self, settings: Settings) {
+    /// Сначала применяет `settings` к сигналам (UI мгновенно отражает выбор),
+    /// затем пишет в SQLite. При успехе очищает баннер ошибки. При отказе
+    /// записывает причину в `error` и откатывает сигналы к сохранённым значениям:
+    /// перечитывает [`ipc::get_settings`], чтобы DOM-select/checkbox совпали с
+    /// хранилищем (откат переживает гонку параллельных сохранений); если чтение
+    /// тоже не удалось — возвращается к снимку до применения.
+    ///
+    /// Возвращает результат записи для вызывающего кода (например, обновить
+    /// баланс только после успешного включения `show_real_balance`); ошибка
+    /// также доступна в сигнале `error`.
+    pub async fn persist_settings(mut self, settings: Settings) -> Result<(), String> {
+        let previous = (self.settings)();
+        // Оптимистичное применение: Settings мал (строка + три enum), клон осознанный.
+        self.apply_settings(settings.clone());
         match ipc::set_settings(&settings).await {
-            Ok(()) => self.apply_settings(settings),
-            Err(e) => self.error.set(Some(e)),
+            Ok(()) => {
+                self.error.set(None);
+                Ok(())
+            }
+            Err(e) => {
+                self.error.set(Some(e.clone()));
+                let stored = ipc::get_settings().await.unwrap_or(previous);
+                self.apply_settings(stored);
+                Err(e)
+            }
         }
     }
 
@@ -148,21 +180,27 @@ impl AppState {
     }
 
     /// Стартовая загрузка: настройки, восстановление Pending, история, баланс, каталоги.
+    ///
+    /// Каждый успех очищает баннер ошибки, отказ — записывает причину
+    /// (семантика «последняя операция», см. поле `error`).
     async fn load(mut self) {
         self.busy.set(true);
+        self.error.set(None);
         match ipc::get_settings().await {
             Ok(settings) => self.apply_settings(settings),
             Err(e) => self.error.set(Some(e)),
         }
         // Восстанавливаем Pending-записи, пережившие перезапуск, затем читаем историю.
-        if let Err(e) = ipc::recover_pending().await {
-            self.error.set(Some(e));
+        match ipc::recover_pending().await {
+            Ok(_) => self.error.set(None),
+            Err(e) => self.error.set(Some(e)),
         }
         self.refresh_history().await;
         self.refresh_balance().await;
         for kind in [MediaKind::Image, MediaKind::Video, MediaKind::Audio] {
             match ipc::fetch_models(kind).await {
                 Ok(models) => {
+                    self.error.set(None);
                     self.models_by_kind.write().insert(kind, models);
                 }
                 Err(e) => self.error.set(Some(e)),
@@ -171,18 +209,27 @@ impl AppState {
         self.busy.set(false);
     }
 
-    /// Перечитывает историю без фильтра (новые первыми).
+    /// Перечитывает историю без фильтра (новые первыми); успех очищает баннер ошибки.
     async fn refresh_history(mut self) {
         match ipc::list_history(&HistoryFilter::default()).await {
-            Ok(records) => self.history.set(records),
+            Ok(records) => {
+                self.error.set(None);
+                self.history.set(records);
+            }
             Err(e) => self.error.set(Some(e)),
         }
     }
 
-    /// Перечитывает баланс.
-    async fn refresh_balance(mut self) {
+    /// Перечитывает баланс; успех очищает баннер ошибки.
+    ///
+    /// Доступен экранам (кнопка «Обновить» в настройках); вызывается также
+    /// по событию `balance:updated`.
+    pub(crate) async fn refresh_balance(mut self) {
         match ipc::fetch_balance().await {
-            Ok(view) => self.balance.set(Some(view)),
+            Ok(view) => {
+                self.error.set(None);
+                self.balance.set(Some(view));
+            }
             Err(e) => self.error.set(Some(e)),
         }
     }

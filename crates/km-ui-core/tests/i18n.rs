@@ -18,6 +18,8 @@ const SCREEN_KEYS: &[&str] = &[
     "common.recent",
     "common.balance",
     "common.spend",
+    "common.refresh",
+    "common.close",
     // studio
     "studio.title",
     "studio.image",
@@ -63,6 +65,12 @@ const SCREEN_KEYS: &[&str] = &[
     "settings.keychain_error",
     "settings.connection_ok",
     "settings.connection_failed",
+    "settings.connection_rejected",
+    "settings.connection_unverified",
+    "settings.checking",
+    "settings.pick_folder",
+    "settings.folder_missing",
+    "settings.available",
     // onboarding
     "onboarding.welcome",
     "onboarding.step_key",

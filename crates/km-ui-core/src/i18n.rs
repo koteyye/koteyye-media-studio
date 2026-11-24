@@ -51,6 +51,8 @@ fn entry(key: &str) -> Option<(&'static str, &'static str)> {
         "common.recent" => ("Недавние", "Recent"),
         "common.balance" => ("Баланс", "Balance"),
         "common.spend" => ("Расход", "Spend"),
+        "common.refresh" => ("Обновить", "Refresh"),
+        "common.close" => ("Закрыть", "Close"),
         // Студия: вкладки медиа и поля формы генерации.
         "studio.title" => ("Студия", "Studio"),
         "studio.image" => ("Изображение", "Image"),
@@ -97,6 +99,15 @@ fn entry(key: &str) -> Option<(&'static str, &'static str)> {
         "settings.keychain_error" => ("Ошибка доступа к связке ключей", "Keychain access error"),
         "settings.connection_ok" => ("Соединение установлено", "Connection OK"),
         "settings.connection_failed" => ("Не удалось подключиться", "Connection failed"),
+        "settings.connection_rejected" => (
+            "ключ не задан или отклонён (401)",
+            "key is not set or rejected (401)",
+        ),
+        "settings.connection_unverified" => ("Подключение не проверено", "Connection not verified"),
+        "settings.checking" => ("Проверка соединения…", "Checking connection…"),
+        "settings.pick_folder" => ("Выбрать папку", "Choose folder"),
+        "settings.folder_missing" => ("Папка не выбрана", "No folder selected"),
+        "settings.available" => ("Доступно", "Available"),
         // Онбординг.
         "onboarding.welcome" => ("Добро пожаловать", "Welcome"),
         "onboarding.step_key" => ("Введите API-ключ", "Enter your API key"),

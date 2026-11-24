@@ -117,6 +117,9 @@ body {
 }
 
 .error-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   margin-bottom: 16px;
   padding: 10px 14px;
   border: 1px solid var(--accent);
@@ -125,24 +128,158 @@ body {
   color: var(--accent);
 }
 
-/* Заглушка настроек: переключатели темы и языка. */
-.stub-controls {
+.error-banner-text {
+  flex: 1;
+}
+
+/* Кнопка ручного закрытия баннера ошибки (сигнал error → None). */
+.banner-dismiss {
+  flex-shrink: 0;
+  padding: 0 4px;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.banner-dismiss:hover {
+  color: var(--accent-hover);
+}
+
+/* Экран настроек: секции с полями (ключ, папка, язык, тема, баланс). */
+.settings {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-width: 560px;
+}
+
+.settings-section {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-width: 320px;
 }
 
-.stub-controls label {
-  font-size: 13px;
-  color: var(--text-muted);
+.section-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
 }
 
-.stub-controls select {
+.field-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.text-input,
+.settings-select {
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
   color: var(--text);
   font-size: 14px;
+}
+
+.text-input {
+  flex: 1;
+  min-width: 200px;
+}
+
+.settings-select {
+  min-width: 200px;
+}
+
+.btn {
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.btn-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.btn-primary:hover:not(:disabled) {
+  border-color: var(--accent-hover);
+  background: var(--accent-hover);
+  color: #ffffff;
+}
+
+/* Статус проверки соединения: ok — текст с ✓, ошибка — акцент, ожидание — muted. */
+.status {
+  margin: 0;
+  font-size: 13px;
+}
+
+.status-ok {
+  color: var(--text);
+}
+
+.status-error {
+  color: var(--accent);
+}
+
+.status-muted {
+  color: var(--text-muted);
+}
+
+.folder-path {
+  flex: 1;
+  min-width: 200px;
+  font-size: 14px;
+  color: var(--text);
+  word-break: break-all;
+}
+
+.folder-path.muted {
+  color: var(--text-muted);
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.checkbox-row input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+.balance-line {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.balance-line.muted {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-muted);
 }
