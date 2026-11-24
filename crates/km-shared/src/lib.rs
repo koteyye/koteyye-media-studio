@@ -1,10 +1,5 @@
 //! Общие типы и утилиты Koteyye Media Studio.
-//!
-//! Пока пустой каркас: содержимое появится в последующих задачах.
 
-#[cfg(test)]
-mod tests {
-    /// Заглушечный тест: крейт собирается, тесты запускаются.
-    #[test]
-    fn smoke() {}
-}
+mod models;
+
+pub use models::{CatalogModel, MediaPrices, ModelType};
