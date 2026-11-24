@@ -10,6 +10,7 @@
   --text-muted: #6b7280;
   --accent: #e05616;
   --accent-hover: #ff7333;
+  --on-accent: #1a0d05;
   color-scheme: light;
 }
 
@@ -218,13 +219,13 @@ body {
 .btn-primary {
   border-color: var(--accent);
   background: var(--accent);
-  color: #ffffff;
+  color: var(--on-accent);
 }
 
 .btn-primary:hover:not(:disabled) {
   border-color: var(--accent-hover);
   background: var(--accent-hover);
-  color: #ffffff;
+  color: var(--on-accent);
 }
 
 /* Статус проверки соединения: ok — текст с ✓, ошибка — акцент, ожидание — muted. */

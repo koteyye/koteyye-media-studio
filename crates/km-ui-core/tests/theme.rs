@@ -1,7 +1,7 @@
 //! Интеграционные тесты CSS-токенов тем «Графит»/«Воздух».
 
 use km_shared::Theme::{Dark, Light, System};
-use km_ui_core::theme::{ACCENT, ACCENT_HOVER, theme_vars};
+use km_ui_core::theme::{ACCENT, ACCENT_HOVER, ON_ACCENT, theme_vars};
 
 /// Полный набор токенов, который обязан присутствовать в каждой теме.
 const TOKENS: &[&str] = &[
@@ -12,12 +12,14 @@ const TOKENS: &[&str] = &[
     "--text-muted:",
     "--accent:",
     "--accent-hover:",
+    "--on-accent:",
 ];
 
 #[test]
 fn accent_consts_pinned() {
     assert_eq!(ACCENT, "#e05616");
     assert_eq!(ACCENT_HOVER, "#ff7333");
+    assert_eq!(ON_ACCENT, "#1a0d05");
 }
 
 #[test]
@@ -71,6 +73,10 @@ fn vars_match_accent_consts() {
         assert!(
             vars.contains(&format!("--accent-hover:{ACCENT_HOVER}")),
             "accent-hover константа разошлась с токенами {theme:?}: {vars}"
+        );
+        assert!(
+            vars.contains(&format!("--on-accent:{ON_ACCENT}")),
+            "on-accent константа разошлась с токенами {theme:?}: {vars}"
         );
     }
 }

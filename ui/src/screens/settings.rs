@@ -128,17 +128,17 @@ pub fn Settings() -> Element {
         },
     };
 
-    // Блок баланса: реальный (available_usd), если включён и получен, иначе расход.
+    // Блок баланса — either/or: реальный available_usd, если включён и получен,
+    // ИНАЧЕ локальный расход (расход всегда виден в сайдбаре, здесь не дублируем).
     let balance_view = match &balance {
-        Some(view) => {
-            let real = shown_real_balance(view, settings.show_real_balance);
-            rsx! {
-                if let Some(real) = real {
-                    p { class: "balance-line", {available_label} ": " {format_usd(real.available_usd)} }
-                }
-                p { class: "balance-line muted", {spend_label} ": " {format_usd(view.local_spend_usd)} }
-            }
-        }
+        Some(view) => match shown_real_balance(view, settings.show_real_balance) {
+            Some(real) => rsx! {
+                p { class: "balance-line", {available_label} ": " {format_usd(real.available_usd)} }
+            },
+            None => rsx! {
+                p { class: "balance-line", {spend_label} ": " {format_usd(view.local_spend_usd)} }
+            },
+        },
         None => rsx! {
             p { class: "muted", {loading_label} }
         },
@@ -337,7 +337,6 @@ async fn save_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use km_shared::AccountBalance;
 
     fn balance(real: Option<AccountBalance>) -> BalanceView {
         BalanceView {

@@ -49,6 +49,9 @@ pub struct AppState {
     /// (`None`), отказ — записывает причину. Баннер также закрывается вручную
     /// (кнопка в [`crate::components::layout::Layout`]).
     pub error: Signal<Option<String>>,
+    /// Монотонный счётчик persist-поколений: захватывается на старте сохранения,
+    /// чтобы откат упавшей задачи не затёр более новый оптимистичный apply.
+    persist_gen: Signal<u64>,
 }
 
 impl Default for AppState {
@@ -79,6 +82,7 @@ impl AppState {
             balance: Signal::new(None),
             busy: Signal::new(true),
             error: Signal::new(None),
+            persist_gen: Signal::new(0),
         }
     }
 
@@ -107,19 +111,38 @@ impl AppState {
         self.settings.set(settings);
     }
 
+    /// Регистрирует новое persist-поколение и возвращает его номер.
+    ///
+    /// Номер монотонно растёт с каждым стартом сохранения; откат сверяет его
+    /// с текущим, чтобы не затереть более новый оптимистичный apply.
+    fn next_generation(mut self) -> u64 {
+        let next = (self.persist_gen)() + 1;
+        self.persist_gen.set(next);
+        next
+    }
+
+    /// Текущий номер persist-поколения (последний стартовавший persist).
+    fn current_generation(self) -> u64 {
+        (self.persist_gen)()
+    }
+
     /// Сохраняет настройки через IPC: оптимистичное применение и откат при ошибке.
     ///
     /// Сначала применяет `settings` к сигналам (UI мгновенно отражает выбор),
     /// затем пишет в SQLite. При успехе очищает баннер ошибки. При отказе
-    /// записывает причину в `error` и откатывает сигналы к сохранённым значениям:
-    /// перечитывает [`ipc::get_settings`], чтобы DOM-select/checkbox совпали с
-    /// хранилищем (откат переживает гонку параллельных сохранений); если чтение
-    /// тоже не удалось — возвращается к снимку до применения.
+    /// записывает причину в `error` и откатывает сигналы к сохранённым значениям
+    /// ([`ipc::get_settings`], при неудаче чтения — снимок до применения).
+    ///
+    /// Откат защищён generation guard: применяется, только если этот persist —
+    /// последний стартовавший ([`rollback_target`]). Если более новый persist уже
+    /// в полёте, ранний откат пропускается, чтобы не затереть его оптимистичный
+    /// apply (иначе UI разошёлся бы с хранилищем после коммита нового значения).
     ///
     /// Возвращает результат записи для вызывающего кода (например, обновить
     /// баланс только после успешного включения `show_real_balance`); ошибка
     /// также доступна в сигнале `error`.
     pub async fn persist_settings(mut self, settings: Settings) -> Result<(), String> {
+        let generation = self.next_generation();
         let previous = (self.settings)();
         // Оптимистичное применение: Settings мал (строка + три enum), клон осознанный.
         self.apply_settings(settings.clone());
@@ -130,8 +153,12 @@ impl AppState {
             }
             Err(e) => {
                 self.error.set(Some(e.clone()));
-                let stored = ipc::get_settings().await.unwrap_or(previous);
-                self.apply_settings(stored);
+                let stored = ipc::get_settings().await.ok();
+                if let Some(target) =
+                    rollback_target(generation, self.current_generation(), stored, previous)
+                {
+                    self.apply_settings(target);
+                }
                 Err(e)
             }
         }
@@ -259,6 +286,26 @@ impl AppState {
     }
 }
 
+/// Решает, нужен ли откат при ошибке persist и какие настройки применить.
+///
+/// `None` — откат не применяется: более новый persist уже стартовал
+/// (`current_generation > generation`), его оптимистичное применение отражает
+/// текущее намерение пользователя, и ранний откат затёр бы его (гонка отката).
+/// `Some(settings)` — применить: авторитетное значение из хранилища `stored`,
+/// либо снимок `previous` до применения, если хранилище не прочиталось.
+#[must_use]
+fn rollback_target(
+    generation: u64,
+    current_generation: u64,
+    stored: Option<Settings>,
+    previous: Settings,
+) -> Option<Settings> {
+    if generation != current_generation {
+        return None;
+    }
+    Some(stored.unwrap_or(previous))
+}
+
 /// Резолвит тему для применения: [`Theme::System`] — по системному предпочтению.
 #[must_use]
 pub fn resolve_theme(theme: Theme, system_dark: bool) -> Theme {
@@ -357,5 +404,48 @@ mod tests {
     fn parse_lang_unknown_falls_back_to_ru() {
         assert_eq!(parse_lang(""), Lang::Ru);
         assert_eq!(parse_lang("de"), Lang::Ru);
+    }
+
+    fn settings_with_theme(theme: Theme) -> Settings {
+        Settings {
+            local_folder: String::new(),
+            lang: Lang::Ru,
+            theme,
+            show_real_balance: false,
+        }
+    }
+
+    #[test]
+    fn early_rollback_does_not_clobber_later_optimistic_apply() {
+        // Persist A (gen=1) падает, но persist B (gen=2) уже стартовал и оптимистично
+        // применил своё значение: откат A не должен затереть его (гонка отката).
+        let stored = settings_with_theme(Theme::Dark);
+        let previous = settings_with_theme(Theme::Light);
+        assert_eq!(
+            rollback_target(1, 2, Some(stored), previous),
+            None,
+            "ранний откат обязан пропуститься, пока более новый persist в полёте"
+        );
+    }
+
+    #[test]
+    fn rollback_applies_stored_for_latest_persist() {
+        // Одиночный/последний persist: откат применяет авторитетное значение из БД.
+        let stored = settings_with_theme(Theme::Dark);
+        let previous = settings_with_theme(Theme::Light);
+        assert_eq!(
+            rollback_target(2, 2, Some(stored.clone()), previous),
+            Some(stored)
+        );
+    }
+
+    #[test]
+    fn rollback_falls_back_to_previous_when_storage_unreadable() {
+        // Хранилище не прочиталось — откат к снимку до оптимистичного применения.
+        let previous = settings_with_theme(Theme::Light);
+        assert_eq!(
+            rollback_target(1, 1, None, previous.clone()),
+            Some(previous)
+        );
     }
 }
