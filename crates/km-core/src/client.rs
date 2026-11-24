@@ -76,6 +76,27 @@ impl CiClient {
         decode(response, path).await
     }
 
+    /// GET-запрос к публичному пути CI без заголовка `Authorization`.
+    ///
+    /// Публичные пути (например `/public/models`) не требуют ключа; ключ,
+    /// даже если задан в клиенте, в такой запрос не попадает.
+    ///
+    /// # Errors
+    ///
+    /// Те же случаи, что и у [`CiClient::get_json`].
+    pub(crate) async fn get_public_json<T: DeserializeOwned>(
+        &self,
+        path: &str,
+    ) -> Result<T, CoreError> {
+        let response = self
+            .http
+            .get(self.url(path))
+            .send()
+            .await
+            .map_err(map_transport_error)?;
+        decode(response, path).await
+    }
+
     /// POST-запрос к `path` с JSON-телом `body` и разбором ответа в `T`.
     ///
     /// # Errors
