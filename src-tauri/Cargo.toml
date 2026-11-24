@@ -9,4 +9,19 @@ license.workspace = true
 tauri-build = { workspace = true }
 
 [dependencies]
+km-core = { version = "2.0.0", path = "../crates/km-core" }
+km-shared = { version = "2.0.0", path = "../crates/km-shared" }
 tauri = { workspace = true }
+# Нативные диалоги (выбор папки сохранения) и opener (открыть файл / показать в папке).
+# opener — актуальный плагин Tauri 2: shell.open устарел с 2.1.0 в его пользу.
+tauri-plugin-dialog = "2.8.4"
+tauri-plugin-opener = "2.7.3"
+# API-ключ — в системном keychain: macOS Keychain и Windows Credential Manager.
+# Linux не целевая платформа (см. План 1), secret-service не подключаем.
+keyring = { version = "3.6.3", features = ["apple-native", "windows-native"] }
+
+[dev-dependencies]
+serde_json = "1.0.154"
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6.5"
