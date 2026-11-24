@@ -3,6 +3,7 @@
 use std::fmt;
 use std::time::Duration;
 
+use km_shared::AccountBalance;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
@@ -213,6 +214,20 @@ impl CiClient {
         }
         let bytes = response.bytes().await.map_err(map_transport_error)?;
         Ok(bytes.to_vec())
+    }
+
+    /// Баланс аккаунта: `GET /v1/account/balance` (нужен scope `account:read`).
+    ///
+    /// Обычный inference-ключ баланс не читает: CI отвечает 403, который
+    /// разбирается в [`CoreError::ScopeMissing`]. Вызывающий использует это
+    /// как сигнал показать локальный расход вместо реального баланса.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::ScopeMissing`] при 403 (нет scope `account:read`);
+    /// остальные случаи — как у [`CiClient::get_json`].
+    pub async fn balance(&self) -> Result<AccountBalance, CoreError> {
+        self.get_json("/v1/account/balance").await
     }
 
     /// Склеивает базовый URL и путь без двойных слешей.

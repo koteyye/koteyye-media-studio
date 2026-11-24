@@ -11,7 +11,10 @@
 //! [`CiClient::generation`]. История, расход и настройки хранятся в SQLite
 //! ([`Storage`]). Результаты генераций сохраняются в локальную папку
 //! ([`save_media`], [`ensure_folder`]), расширения подбираются по
-//! content-type ([`ext_for`]).
+//! content-type ([`ext_for`]). Оркестратор [`Jobs`] связывает клиент, хранилище
+//! и файлы в единый поток генерации: запуск ([`Jobs::run`]), восстановление
+//! незавершённых записей ([`Jobs::recover_pending`]) и гибридный баланс
+//! ([`Jobs::balance_view`], [`CiClient::balance`]).
 
 mod audio;
 mod catalog;
@@ -19,6 +22,7 @@ mod client;
 mod error;
 mod files;
 mod images;
+mod jobs;
 mod storage;
 mod video;
 
@@ -27,4 +31,5 @@ pub use client::CiClient;
 pub use error::CoreError;
 pub use files::{ensure_folder, ext_for, save_media};
 pub use images::image_bytes;
+pub use jobs::Jobs;
 pub use storage::Storage;
