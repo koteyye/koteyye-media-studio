@@ -1110,7 +1110,9 @@ async fn run_video_empty_videos_marks_failed() {
 
 #[tokio::test]
 async fn run_video_non_completed_status_marks_failed_without_download() {
-    for status in ["failed", "processing"] {
+    // Definitive-статусы (не «ещё идёт»): failed/cancelled сжигаются в Failed;
+    // processing/pending/in_progress покрыты video_processing_keeps_pending.
+    for status in ["failed", "cancelled"] {
         let server = MockServer::start().await;
         let video_url = format!("{}/signed/v.mp4", server.uri());
         Mock::given(method("POST"))
@@ -1341,9 +1343,14 @@ async fn recover_pending_db_error_isolates_records_and_keeps_them_recoverable() 
         .recover_pending()
         .await
         .expect("сбой БД одной записи не прерывает восстановление");
+    assert_eq!(
+        recovered.len(),
+        2,
+        "записи с ошибкой БД обработаны и возвращаются как Pending"
+    );
     assert!(
-        recovered.is_empty(),
-        "записи с ошибкой БД не попадают в обновлённые"
+        recovered.iter().all(|r| r.status == JobStatus::Pending),
+        "Db-ошибка не сжигает записи: обе остаются Pending"
     );
     // Изоляция: обработаны ОБЕ записи, а не только первая.
     let requests = received(&server).await;
@@ -1378,6 +1385,354 @@ async fn recover_pending_db_error_isolates_records_and_keeps_them_recoverable() 
     let b = recovered.iter().find(|r| r.id == "b").expect("запись b");
     assert_eq!(b.status, JobStatus::Completed, "generation OK -> Completed");
     assert_eq!(std::fs::read(&b.local_paths[0]).expect("файл"), b"hi");
+}
+
+#[tokio::test]
+async fn recovery_http_5xx_keeps_pending() {
+    let server = MockServer::start().await;
+    // Generation OK, но CDN отдаёт 503 — транзиентный сбой, не definitive:
+    // оплаченная генерация жива на CI, запись обязана остаться Pending.
+    let generation_guard = Mock::given(method("GET"))
+        .and(path("/v1/generations/req_5xx"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "request_id": "req_5xx",
+            "endpoint": "/v1/videos/generations",
+            "created_at": "2026-11-24T10:00:00Z",
+            "expires_at": "2026-12-01T10:00:00Z",
+            "files": [{
+                "index": 0, "type": "video", "content_type": "video/mp4",
+                "size_bytes": 2, "url": format!("{}/signed/503.mp4", server.uri()),
+            }],
+        })))
+        .expect(2)
+        .mount_as_scoped(&server)
+        .await;
+    let fail_guard = Mock::given(method("GET"))
+        .and(path("/signed/503.mp4"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount_as_scoped(&server)
+        .await;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("h.db");
+    let storage = Storage::open(&db).expect("БД");
+    let reader = Storage::open(&db).expect("reader");
+    let mut rec = history_record(
+        "5xx",
+        MediaKind::Video,
+        GenMode::TextToVideo,
+        JobStatus::Pending,
+    );
+    rec.request_id = Some("req_5xx".to_owned());
+    storage.insert_history(&rec).expect("insert");
+    let (jobs, events) = jobs_with(client_for(&server), storage, tmp.path().join("media"));
+
+    let recovered = jobs.recover_pending().await.expect("recover");
+    assert_eq!(recovered.len(), 1, "запись обработана");
+    assert_eq!(
+        recovered[0].status,
+        JobStatus::Pending,
+        "HTTP 503 при скачивании не сжигает оплаченную генерацию"
+    );
+    assert_eq!(
+        recovered[0].request_id.as_deref(),
+        Some("req_5xx"),
+        "request_id сохранён для следующей попытки"
+    );
+    let history = reader.history(&all()).expect("history");
+    assert_eq!(history[0].status, JobStatus::Pending, "в БД запись Pending");
+    assert!(
+        events.lock().expect("lock").is_empty(),
+        "ни Done, ни Failed при транзиентной ошибке"
+    );
+    drop(fail_guard);
+
+    // Следующий запуск: CDN ожил — та же запись восстанавливается.
+    Mock::given(method("GET"))
+        .and(path("/signed/503.mp4"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"hi"))
+        .mount(&server)
+        .await;
+    let recovered = jobs.recover_pending().await.expect("повторный recover");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(
+        recovered[0].status,
+        JobStatus::Completed,
+        "повторная попытка завершает запись"
+    );
+    assert_eq!(
+        std::fs::read(&recovered[0].local_paths[0]).expect("файл"),
+        b"hi"
+    );
+    drop(generation_guard);
+}
+
+#[tokio::test]
+async fn recovery_http_429_keeps_pending() {
+    let server = MockServer::start().await;
+    // 429 (rate limit) — транзиентный ответ: повтор имеет смысл.
+    let file_url = format!("{}/signed/429.mp4", server.uri());
+    Mock::given(method("GET"))
+        .and(path("/v1/generations/req_429"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "request_id": "req_429",
+            "endpoint": "/v1/videos/generations",
+            "created_at": "2026-11-24T10:00:00Z",
+            "expires_at": "2026-12-01T10:00:00Z",
+            "files": [{
+                "index": 0, "type": "video", "content_type": "video/mp4",
+                "size_bytes": 2, "url": file_url,
+            }],
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/signed/429.mp4"))
+        .respond_with(ResponseTemplate::new(429))
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("h.db");
+    let storage = Storage::open(&db).expect("БД");
+    let reader = Storage::open(&db).expect("reader");
+    let mut rec = history_record(
+        "429",
+        MediaKind::Video,
+        GenMode::TextToVideo,
+        JobStatus::Pending,
+    );
+    rec.request_id = Some("req_429".to_owned());
+    storage.insert_history(&rec).expect("insert");
+    let (jobs, events) = jobs_with(client_for(&server), storage, tmp.path().join("media"));
+
+    let recovered = jobs.recover_pending().await.expect("recover");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(
+        recovered[0].status,
+        JobStatus::Pending,
+        "HTTP 429 не сжигает оплаченную генерацию"
+    );
+    assert_eq!(recovered[0].request_id.as_deref(), Some("req_429"));
+    let history = reader.history(&all()).expect("history");
+    assert_eq!(history[0].status, JobStatus::Pending, "в БД запись Pending");
+    assert!(events.lock().expect("lock").is_empty(), "событий нет");
+}
+
+#[tokio::test]
+async fn recovery_db_error_keeps_pending() {
+    let server = MockServer::start().await;
+    // Generation и скачивание OK, но complete() упрётся в заблокированную БД:
+    // Db-ошибка записи не должна сжигать оплаченную генерацию.
+    let file_url = format!("{}/signed/db.mp4", server.uri());
+    Mock::given(method("GET"))
+        .and(path("/v1/generations/req_db"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "request_id": "req_db",
+            "endpoint": "/v1/videos/generations",
+            "created_at": "2026-11-24T10:00:00Z",
+            "expires_at": "2026-12-01T10:00:00Z",
+            "files": [{
+                "index": 0, "type": "video", "content_type": "video/mp4",
+                "size_bytes": 2, "url": file_url,
+            }],
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/signed/db.mp4"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"hi"))
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("h.db");
+    let storage = Storage::open(&db).expect("БД");
+    let reader = Storage::open(&db).expect("reader");
+    let mut rec = history_record(
+        "db",
+        MediaKind::Video,
+        GenMode::TextToVideo,
+        JobStatus::Pending,
+    );
+    rec.request_id = Some("req_db".to_owned());
+    storage.insert_history(&rec).expect("insert");
+    let (jobs, events) = jobs_with(client_for(&server), storage, tmp.path().join("media"));
+
+    // Третье соединение держит write-лок (BEGIN IMMEDIATE): чтение pending
+    // проходит, а обновление записи получает SQLITE_BUSY.
+    let locker = rusqlite::Connection::open(&db).expect("соединение-лок");
+    locker
+        .execute_batch("BEGIN IMMEDIATE;")
+        .expect("write-лок должен захватиться");
+
+    let recovered = jobs.recover_pending().await.expect("recover");
+    assert_eq!(recovered.len(), 1, "запись обработана");
+    assert_eq!(
+        recovered[0].status,
+        JobStatus::Pending,
+        "Db-сбой complete() не сжигает оплаченную генерацию"
+    );
+    assert_eq!(recovered[0].request_id.as_deref(), Some("req_db"));
+    let history = reader.history(&all()).expect("history");
+    assert_eq!(history[0].status, JobStatus::Pending, "в БД запись Pending");
+    assert!(events.lock().expect("lock").is_empty(), "событий нет");
+
+    locker.execute_batch("ROLLBACK;").expect("лок снимается");
+    drop(locker);
+
+    // Следующий запуск без лока: запись доходит до Completed.
+    let recovered = jobs.recover_pending().await.expect("повторный recover");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].status, JobStatus::Completed);
+    assert_eq!(
+        std::fs::read(&recovered[0].local_paths[0]).expect("файл"),
+        b"hi"
+    );
+}
+
+#[tokio::test]
+async fn run_transient_download_keeps_pending() {
+    let server = MockServer::start().await;
+    // generate_video 200: request_id фиксируется до скачивания. Ссылка ведёт
+    // на закрытый порт -> Network. Запись обязана остаться Pending с id.
+    let guard = Mock::given(method("POST"))
+        .and(path("/v1/videos/generations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "vid_net",
+            "status": "completed",
+            "videos": [{"url": "http://127.0.0.1:1/signed/v.mp4", "content_type": "video/mp4"}],
+            "request_id": "req_run_net",
+            "billing": {"billed_cost_usd": "0.600000"},
+        })))
+        .expect(1)
+        .mount_as_scoped(&server)
+        .await;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("h.db");
+    let storage = Storage::open(&db).expect("БД");
+    let reader = Storage::open(&db).expect("reader");
+    let (jobs, events) = jobs_with(client_for(&server), storage, tmp.path().join("media"));
+
+    let err = jobs
+        .run(video_request())
+        .await
+        .expect_err("сбой скачивания — ошибка для UI");
+    assert!(
+        matches!(err, CoreError::Network(_)),
+        "ожидался Network: {err:?}"
+    );
+
+    let history = reader.history(&all()).expect("history");
+    assert_eq!(history.len(), 1);
+    assert_eq!(
+        history[0].status,
+        JobStatus::Pending,
+        "транзиентный сбой после фиксации request_id не сжигает Paid-Pending"
+    );
+    assert_eq!(
+        history[0].request_id.as_deref(),
+        Some("req_run_net"),
+        "request_id сохранён до скачивания"
+    );
+    assert!(history[0].local_paths.is_empty(), "файлы не сохранены");
+    let events = events.lock().expect("lock").clone();
+    assert_eq!(events.len(), 1, "только Started: запись не Failed");
+    assert!(matches!(events[0], AppEvent::GenerationStarted { .. }));
+    drop(guard);
+
+    // Recovery подхватит запись: generation отдаёт живую ссылку.
+    let file_url = format!("{}/signed/ok.mp4", server.uri());
+    Mock::given(method("GET"))
+        .and(path("/v1/generations/req_run_net"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "request_id": "req_run_net",
+            "endpoint": "/v1/videos/generations",
+            "created_at": "2026-11-24T10:00:00Z",
+            "expires_at": "2026-12-01T10:00:00Z",
+            "files": [{
+                "index": 0, "type": "video", "content_type": "video/mp4",
+                "size_bytes": 2, "url": file_url,
+            }],
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/signed/ok.mp4"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"hi"))
+        .mount(&server)
+        .await;
+
+    let recovered = jobs.recover_pending().await.expect("recover");
+    assert_eq!(recovered.len(), 1, "Pending-запись подхвачена recovery");
+    assert_eq!(recovered[0].status, JobStatus::Completed);
+    assert_eq!(
+        std::fs::read(&recovered[0].local_paths[0]).expect("файл"),
+        b"hi"
+    );
+}
+
+#[tokio::test]
+async fn video_processing_keeps_pending() {
+    for status in ["processing", "pending", "in_progress"] {
+        let server = MockServer::start().await;
+        let video_url = format!("{}/signed/v.mp4", server.uri());
+        Mock::given(method("POST"))
+            .and(path("/v1/videos/generations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "vid_proc",
+                "status": status,
+                "videos": [{"url": video_url, "content_type": "video/mp4"}],
+                "request_id": "req_proc",
+            })))
+            .mount(&server)
+            .await;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let db = tmp.path().join("h.db");
+        let storage = Storage::open(&db).expect("БД");
+        let reader = Storage::open(&db).expect("reader");
+        let (jobs, events) = jobs_with(client_for(&server), storage, tmp.path().join("media"));
+
+        let err = jobs
+            .run(video_request())
+            .await
+            .expect_err("незавершённый статус — не Completed");
+        assert!(
+            matches!(err, CoreError::Serde(_)),
+            "ожидался Serde: {err:?}"
+        );
+        assert!(
+            err.to_string().contains(status),
+            "ошибка содержит статус CI: {err}"
+        );
+
+        let history = reader.history(&all()).expect("history");
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history[0].status,
+            JobStatus::Pending,
+            "статус {status}: генерация ещё идёт, запись не сжигается"
+        );
+        assert_eq!(
+            history[0].request_id.as_deref(),
+            Some("req_proc"),
+            "request_id сохранён до status-guard (статус {status})"
+        );
+        assert!(history[0].local_paths.is_empty(), "файлы не сохранены");
+        // Скачивание не начинается: статус проверен до файлов.
+        let requests = received(&server).await;
+        assert!(
+            requests.iter().all(|r| r.url.path() != "/signed/v.mp4"),
+            "при статусе {status} файл не скачивается"
+        );
+        // Событие Failed не шлётся: запись остаётся Pending.
+        let events = events.lock().expect("lock").clone();
+        assert_eq!(events.len(), 1, "только Started при статусе {status}");
+        assert!(matches!(events[0], AppEvent::GenerationStarted { .. }));
+    }
 }
 
 #[test]
