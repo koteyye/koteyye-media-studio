@@ -1,0 +1,12 @@
+[package]
+name = "koteyye-media-studio"
+description = "Koteyye Media Studio — десктопная студия генерации медиа (Tauri 2)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[build-dependencies]
+tauri-build = { workspace = true }
+
+[dependencies]
+tauri = { workspace = true }

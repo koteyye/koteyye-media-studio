@@ -1,0 +1,26 @@
+/* Базовые стили заглушки Koteyye Media Studio. */
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: #141414;
+  color: #f2f2f2;
+}
+
+h1 {
+  margin: 0;
+  font-size: 28px;
+  font-weight: 600;
+}
+
+p {
+  margin: 0;
+  font-size: 16px;
+  color: #a3a3a3;
+}

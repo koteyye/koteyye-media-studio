@@ -1,0 +1,8 @@
+[package]
+name = "km-shared"
+description = "Общие типы и утилиты Koteyye Media Studio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

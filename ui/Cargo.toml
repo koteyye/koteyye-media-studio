@@ -1,0 +1,9 @@
+[package]
+name = "km-ui"
+description = "UI Koteyye Media Studio на Dioxus, компилируется в WASM"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dioxus = { workspace = true, features = ["web"] }

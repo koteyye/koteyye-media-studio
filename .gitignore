@@ -7,3 +7,7 @@ dist/
 .env
 .agents
 .superpowers/
+
+# Rust / Tauri / Dioxus
+target/
+src-tauri/gen/schemas/

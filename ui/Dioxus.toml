@@ -1,0 +1,23 @@
+# Конфигурация Dioxus CLI (0.7): UI собирается в WASM, dev-сервер на http://localhost:8080.
+# Сборка: dx build кладёт файлы в target/dx, а dx bundle копирует их в out_dir (dist/public).
+[application]
+name = "km-ui"
+out_dir = "dist"
+# Статика (стили, иконки) копируется в dist как есть.
+public_dir = "assets"
+
+[web.app]
+title = "Koteyye Media Studio 2.0"
+# Пустой base_path = раздача от корня (в 0.7 значение "." монтируется как путь "/.").
+base_path = ""
+
+[web.watcher]
+reload_html = true
+watch_path = ["src", "assets"]
+
+[web.resource]
+# public_dir копирует содержимое assets/ в корень dist, поэтому путь здесь — от корня.
+style = ["style.css"]
+
+[web.resource.dev]
+script = []

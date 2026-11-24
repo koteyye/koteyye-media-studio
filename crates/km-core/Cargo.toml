@@ -1,0 +1,8 @@
+[package]
+name = "km-core"
+description = "Ядро Koteyye Media Studio: генерация медиа через Cheaper Inference"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
