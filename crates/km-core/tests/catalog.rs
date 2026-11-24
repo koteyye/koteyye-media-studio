@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use km_core::{CatalogCache, CiClient, CoreError, by_kind, for_mode};
-use km_shared::{CatalogModel, GenMode, MediaKind};
+use km_shared::{CatalogModel, GenMode, MediaKind, ModelType};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path};
@@ -299,36 +299,61 @@ fn for_mode_image_edit_only_models_with_edits_endpoint() {
     assert_eq!(
         ids(&for_mode(&models, GenMode::ImageEdit)),
         ["flux-2-pro", "seedream-5.0-pro", "gpt-image-2"],
-        "ImageEdit включает только модели с /v1/images/edits"
+        "ImageEdit включает только image-модели с /v1/images/edits"
     );
 }
 
 #[test]
-fn for_mode_text_modes_select_by_type_and_endpoint() {
+fn for_mode_text_modes_select_by_model_type() {
     let models = fixture_models();
-    assert_eq!(
-        ids(&for_mode(&models, GenMode::TextToImage)),
-        ["flux-2-pro", "seedream-5.0-pro", "gpt-image-2"]
+    let t2i = for_mode(&models, GenMode::TextToImage);
+    assert_eq!(ids(&t2i), ["flux-2-pro", "seedream-5.0-pro", "gpt-image-2"]);
+    assert!(
+        t2i.iter().all(|m| m.model_type == ModelType::Image),
+        "TextToImage — только image-тип, без video/speech"
     );
+    let t2v = for_mode(&models, GenMode::TextToVideo);
     assert_eq!(
-        ids(&for_mode(&models, GenMode::TextToVideo)),
+        ids(&t2v),
         ["kling-v3.0-i2v", "veo-3.1-generate-001", "wan-v2.7-r2v"]
     );
+    assert!(
+        t2v.iter().all(|m| m.model_type == ModelType::Video),
+        "TextToVideo — только video-тип"
+    );
 }
 
 #[test]
-fn for_mode_image_to_video_uses_image_input_feature() {
+fn for_mode_image_to_video_is_video_only_with_image_input() {
     let models = fixture_models();
-    // Правило брифа дословно: feature "image-input" (без проверки типа модели).
+    let got = for_mode(&models, GenMode::ImageToVideo);
     assert_eq!(
-        ids(&for_mode(&models, GenMode::ImageToVideo)),
-        [
-            "kling-v3.0-i2v",
-            "seedream-5.0-pro",
-            "veo-3.1-generate-001",
-            "wan-v2.7-r2v",
-            "gpt-image-2"
-        ]
+        ids(&got),
+        ["kling-v3.0-i2v", "veo-3.1-generate-001", "wan-v2.7-r2v"],
+        "ImageToVideo — только video-модели с image-input"
+    );
+    // Регрессия: image-модели тоже имеют фичу image-input, но не должны попадать в i2v.
+    assert!(
+        !got.iter().any(|m| m.id == "seedream-5.0-pro"),
+        "seedream-5.0-pro — image-тип, не должен попадать в ImageToVideo"
+    );
+    assert!(
+        !got.iter().any(|m| m.id == "gpt-image-2"),
+        "gpt-image-2 — image-тип, не должен попадать в ImageToVideo"
+    );
+}
+
+#[test]
+fn for_mode_image_edit_requires_image_type() {
+    // Регрессия: эндпоинт edits сам по себе не делает модель image-редактором.
+    let models = vec![
+        model("flux-2-pro", "image", &["/v1/images/edits"], &[]),
+        model("video-with-edits", "video", &["/v1/images/edits"], &[]),
+    ];
+    assert_eq!(
+        ids(&for_mode(&models, GenMode::ImageEdit)),
+        ["flux-2-pro"],
+        "ImageEdit требует image-тип, а не только эндпоинт edits"
     );
 }
 
@@ -346,7 +371,7 @@ fn for_mode_reference_to_video_accepts_r2v_id_or_image_input() {
         ),
         // Ни r2v, ни image-input — не подходит.
         model("plain-t2v", "video", &["/v1/videos/generations"], &[]),
-        // Не видео-эндпоинт — не подходит, даже с image-input.
+        // Не video-тип — не подходит, даже с image-input.
         model(
             "flux-2-pro",
             "image",
@@ -361,12 +386,40 @@ fn for_mode_reference_to_video_accepts_r2v_id_or_image_input() {
 }
 
 #[test]
+fn for_mode_reference_to_video_on_fixture_excludes_image_models() {
+    let models = fixture_models();
+    let got = for_mode(&models, GenMode::ReferenceToVideo);
+    assert_eq!(
+        ids(&got),
+        ["kling-v3.0-i2v", "veo-3.1-generate-001", "wan-v2.7-r2v"],
+        "ReferenceToVideo — video-модели с image-input или r2v в id"
+    );
+    assert!(
+        got.iter().any(|m| m.id == "wan-v2.7-r2v"),
+        "wan-v2.7-r2v подходит по маркеру r2v в id"
+    );
+    assert!(
+        got.iter().all(|m| m.model_type == ModelType::Video),
+        "никаких image-моделей в ReferenceToVideo"
+    );
+}
+
+#[test]
 fn for_mode_audio_modes_split_speech_music_and_effects() {
     let models = fixture_models();
+    let speech = for_mode(&models, GenMode::Speech);
     assert_eq!(
-        ids(&for_mode(&models, GenMode::Speech)),
+        ids(&speech),
         ["eleven-v4", "tts-1"],
         "Speech — озвучка, без музыки и эффектов"
+    );
+    assert!(
+        !speech.iter().any(|m| m.id == "music-v2"),
+        "music-v2 не должен попадать в Speech"
+    );
+    assert!(
+        !speech.iter().any(|m| m.id == "sound-effects-v2"),
+        "sound-effects-v2 не должен попадать в Speech"
     );
     assert_eq!(ids(&for_mode(&models, GenMode::Music)), ["music-v2"]);
     assert_eq!(

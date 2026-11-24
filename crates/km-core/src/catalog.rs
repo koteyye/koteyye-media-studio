@@ -141,53 +141,46 @@ pub fn by_kind(models: &[CatalogModel], kind: MediaKind) -> Vec<&CatalogModel> {
 
 /// Отбирает модели, совместимые с режимом генерации.
 ///
-/// Правила: TextToImage/TextToVideo — тип модели и её эндпоинт генерации;
-/// ImageEdit — эндпоинт `/v1/images/edits`; ImageToVideo — возможность
-/// `image-input`; ReferenceToVideo — видео-эндпоинт и (`image-input` или
-/// `r2v` в id). Аудио-режимы все идут через speech-эндпоинт и различаются
-/// маркером в id: Speech — озвучка (без музыки и эффектов), Music — `music`,
-/// SoundEffects — `sound-effects`. Порядок моделей сохраняется.
+/// Правила по типу модели и возможностям:
+/// - TextToImage — тип `image`; TextToVideo — тип `video`.
+/// - ImageEdit — тип `image` и эндпоинт `/v1/images/edits`.
+/// - ImageToVideo — тип `video` и возможность `image-input`.
+/// - ReferenceToVideo — тип `video` и (`image-input` или `r2v` в id).
+/// - Speech — тип `speech`, id без `music` и `sound-effects`;
+///   Music — тип `speech` и `music` в id; SoundEffects — тип `speech`
+///   и `sound-effects` в id.
+///
+/// Проверка типа обязательна: например, `image-input` есть и у image-моделей
+/// (для редактирования), но в ImageToVideo они не попадают.
+/// Порядок моделей сохраняется; возвращаются ссылки на элементы `models`.
 #[must_use]
 pub fn for_mode(models: &[CatalogModel], mode: GenMode) -> Vec<&CatalogModel> {
     models
         .iter()
         .filter(|model| match mode {
-            GenMode::TextToImage => {
-                model.model_type == ModelType::Image && model.supports("/v1/images/generations")
+            GenMode::TextToImage => model.model_type == ModelType::Image,
+            GenMode::ImageEdit => {
+                model.model_type == ModelType::Image && model.supports("/v1/images/edits")
             }
-            GenMode::ImageEdit => model.supports("/v1/images/edits"),
-            GenMode::TextToVideo => {
-                model.model_type == ModelType::Video && model.supports("/v1/videos/generations")
+            GenMode::TextToVideo => model.model_type == ModelType::Video,
+            GenMode::ImageToVideo => {
+                model.model_type == ModelType::Video && model.has_feature("image-input")
             }
-            GenMode::ImageToVideo => model.has_feature("image-input"),
             GenMode::ReferenceToVideo => {
-                model.supports("/v1/videos/generations")
+                model.model_type == ModelType::Video
                     && (model.has_feature("image-input") || model.id.contains("r2v"))
             }
             GenMode::Speech => {
                 model.model_type == ModelType::Speech
-                    && model.supports("/v1/audio/speech")
-                    && !is_music_or_effects(model)
+                    && !model.id.contains("music")
+                    && !model.id.contains("sound-effects")
             }
-            GenMode::Music => {
-                model.model_type == ModelType::Speech
-                    && model.supports("/v1/audio/speech")
-                    && model.id.contains("music")
-            }
+            GenMode::Music => model.model_type == ModelType::Speech && model.id.contains("music"),
             GenMode::SoundEffects => {
-                model.model_type == ModelType::Speech
-                    && model.supports("/v1/audio/speech")
-                    && (model.id.contains("sound-effects") || model.id.contains("sound_effects"))
+                model.model_type == ModelType::Speech && model.id.contains("sound-effects")
             }
         })
         .collect()
-}
-
-/// Модель музыки или звуковых эффектов — по маркеру в id (тип у всех speech).
-fn is_music_or_effects(model: &CatalogModel) -> bool {
-    model.id.contains("music")
-        || model.id.contains("sound-effects")
-        || model.id.contains("sound_effects")
 }
 
 #[cfg(test)]
