@@ -118,6 +118,38 @@ impl CiClient {
         decode(response, path).await
     }
 
+    /// POST-запрос к `path` с JSON-телом `body`; ответ — сырые байты и заголовки.
+    ///
+    /// В отличие от [`CiClient::post_json`], тело ответа не разбирается как JSON:
+    /// метод нужен для бинарных ответов (аудио). Заголовки возвращаются целиком,
+    /// чтобы вызывающий мог прочитать MIME-тип и стоимость.
+    ///
+    /// # Errors
+    ///
+    /// Те же случаи, что и у [`CiClient::get_json`], кроме [`CoreError::Serde`]:
+    /// успешное тело не разбирается как JSON.
+    pub async fn post_bytes<B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<(Vec<u8>, reqwest::header::HeaderMap), CoreError> {
+        let response = self
+            .http
+            .post(self.url(path))
+            .bearer_auth(&self.key)
+            .json(body)
+            .send()
+            .await
+            .map_err(map_transport_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(http_error(status, path, response).await);
+        }
+        let headers = response.headers().clone();
+        let bytes = response.bytes().await.map_err(map_transport_error)?;
+        Ok((bytes.to_vec(), headers))
+    }
+
     /// Скачивает байты по signed URL без заголовка `Authorization`.
     ///
     /// Signed URL уже содержит токен доступа в query-параметрах, поэтому
@@ -248,12 +280,26 @@ fn is_account_path(path: &str) -> bool {
 }
 
 /// Ошибка транспорта reqwest: таймаут отдельно, остальное — сеть.
+///
+/// URL в сообщении очищается от query и fragment: signed URL несут токены
+/// доступа в query-параметрах, которые не должны попадать в текст ошибки.
 fn map_transport_error(err: reqwest::Error) -> CoreError {
     if err.is_timeout() {
-        CoreError::Timeout
-    } else {
-        CoreError::Network(err.to_string())
+        return CoreError::Timeout;
     }
+    let mut message = err.to_string();
+    if let Some(url) = err.url() {
+        message = message.replace(url.as_str(), &redact_url(url));
+    }
+    CoreError::Network(message)
+}
+
+/// URL без query и fragment — для сообщений об ошибках.
+fn redact_url(url: &reqwest::Url) -> String {
+    let mut clean = url.clone();
+    clean.set_query(None);
+    clean.set_fragment(None);
+    clean.to_string()
 }
 
 #[cfg(test)]
@@ -285,6 +331,16 @@ mod tests {
         assert_eq!(normalize_code(Some(&json!(429))), Some("429".to_owned()));
         assert_eq!(normalize_code(Some(&Value::Null)), None);
         assert_eq!(normalize_code(None), None);
+    }
+
+    #[test]
+    fn redact_url_strips_query_and_fragment() {
+        let url = reqwest::Url::parse("https://cdn.example.com/a.mp3?sig=secret#frag")
+            .expect("URL должен разобрать");
+        assert_eq!(redact_url(&url), "https://cdn.example.com/a.mp3");
+        let plain =
+            reqwest::Url::parse("https://api.example.com/v1/models").expect("URL должен разобрать");
+        assert_eq!(redact_url(&plain), "https://api.example.com/v1/models");
     }
 
     #[test]

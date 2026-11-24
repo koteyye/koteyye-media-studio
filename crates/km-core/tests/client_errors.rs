@@ -301,3 +301,110 @@ async fn connection_refused_maps_to_network() {
         "ожидался Network, получено: {err:?}"
     );
 }
+
+#[tokio::test]
+async fn post_bytes_returns_body_and_headers() {
+    let server = MockServer::start().await;
+    let payload = [0xFF, 0xFB, 0x90, 0x64];
+    let body = json!({"model": "eleven-v4", "input": "кот"});
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/speech"))
+        .and(body_json(body.clone()))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(payload)
+                .insert_header("content-type", "audio/mpeg")
+                .insert_header("x-ci-billed-cost-usd", "0.020000"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let (bytes, headers) = client_for(&server)
+        .post_bytes("/v1/audio/speech", &body)
+        .await
+        .expect("POST с бинарным ответом должен вернуть байты и заголовки");
+    assert_eq!(bytes, payload.to_vec(), "байты тела возвращаются как есть");
+    assert_eq!(
+        headers
+            .get("x-ci-billed-cost-usd")
+            .and_then(|v| v.to_str().ok()),
+        Some("0.020000"),
+        "заголовки ответа доступны вызывающему"
+    );
+    assert_eq!(
+        headers.get("content-type").and_then(|v| v.to_str().ok()),
+        Some("audio/mpeg")
+    );
+}
+
+#[tokio::test]
+async fn post_bytes_http_error_uses_envelope() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/speech"))
+        .respond_with(error_response(
+            402,
+            json!("insufficient_balance"),
+            "not enough funds",
+        ))
+        .mount(&server)
+        .await;
+
+    let err = client_for(&server)
+        .post_bytes("/v1/audio/speech", &json!({"input": "кот"}))
+        .await
+        .expect_err("402 должен вернуть ошибку");
+    assert!(
+        matches!(&err, CoreError::Http { status: 402, code: Some(code), .. }
+            if code == "insufficient_balance"),
+        "ожидался Http{{402, insufficient_balance}}, получено: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn post_bytes_network_error_redacts_query_token() {
+    // Закрытый порт + query-токен: сообщение об ошибке не должно нести токен.
+    let client = CiClient::with_base("ci_live_test", "http://127.0.0.1:1");
+
+    let err = client
+        .post_bytes(
+            "/v1/audio/speech?sig=secret-token",
+            &json!({"input": "кот"}),
+        )
+        .await
+        .expect_err("закрытый порт должен вернуть ошибку");
+    let CoreError::Network(message) = &err else {
+        panic!("ожидался Network, получено: {err:?}");
+    };
+    assert!(
+        !message.contains("secret-token"),
+        "query-токен не должен попадать в сообщение: {message}"
+    );
+    assert!(
+        message.contains("/v1/audio/speech"),
+        "путь должен остаться в сообщении: {message}"
+    );
+}
+
+#[tokio::test]
+async fn download_network_error_redacts_query_token() {
+    // Signed URL с токеном в query: при сетевой ошибке токен не утекает в текст.
+    let client = CiClient::with_base("ci_live_test", "http://127.0.0.1:1");
+
+    let err = client
+        .download("http://127.0.0.1:1/signed/img.png?sig=secret-token")
+        .await
+        .expect_err("закрытый порт должен вернуть ошибку");
+    let CoreError::Network(message) = &err else {
+        panic!("ожидался Network, получено: {err:?}");
+    };
+    assert!(
+        !message.contains("secret-token"),
+        "query-токен signed URL не должен попадать в сообщение: {message}"
+    );
+    assert!(
+        message.contains("/signed/img.png"),
+        "путь должен остаться в сообщении: {message}"
+    );
+}
