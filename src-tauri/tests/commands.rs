@@ -291,6 +291,27 @@ async fn test_connection_without_key_returns_false_without_http() {
 }
 
 #[tokio::test]
+async fn test_connection_non_401_error_returns_err() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+            "error": {"code": "internal", "message": "boom"},
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let (state, _events) = state_for(&server, &tmp, Some("ci_live_test"));
+
+    let err = cmd_test_connection(&state)
+        .await
+        .expect_err("500 — не вердикт о подключении, а ошибка");
+    assert!(err.contains("500"), "ошибка содержит статус: {err}");
+}
+
+#[tokio::test]
 async fn fetch_balance_403_falls_back_to_local() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -573,6 +594,49 @@ async fn recover_pending_completes_crashed_record_and_emits_balance() {
         events.iter().any(|e| matches!(e, AppEvent::BalanceUpdated)),
         "событие BalanceUpdated после восстановления"
     );
+
+    drop(guard);
+}
+
+#[tokio::test]
+async fn recover_pending_without_key_keeps_records_pending() {
+    let server = MockServer::start().await;
+    // Без ключа запросов к CI быть не должно: оплаченная генерация могла
+    // завершиться на сервере, запись должна дождаться запуска с ключом.
+    let guard = Mock::given(method("GET"))
+        .and(path("/v1/generations/req_crash"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount_as_scoped(&server)
+        .await;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let (state, events) = state_for(&server, &tmp, None);
+    with_folder(&state, &tmp);
+    let mut rec = history_record("crashed", JobStatus::Pending);
+    rec.request_id = Some("req_crash".to_owned());
+    state.storage.insert_history(&rec).expect("запись");
+
+    let recovered = cmd_recover_pending(&state)
+        .await
+        .expect("recover_pending без ключа не ошибка");
+    assert!(
+        recovered.is_empty(),
+        "без ключа ничего не восстанавливается"
+    );
+
+    let history = state
+        .storage
+        .history(&HistoryFilter::default())
+        .expect("история");
+    assert_eq!(history.len(), 1, "запись на месте");
+    assert_eq!(
+        history[0].status,
+        JobStatus::Pending,
+        "запись не сжигается в Failed без ключа"
+    );
+    assert!(received(&server).await.is_empty(), "запрос к CI не идёт");
+    assert!(events.lock().expect("lock").is_empty(), "событий нет");
 
     drop(guard);
 }

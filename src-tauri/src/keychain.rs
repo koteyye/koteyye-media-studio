@@ -64,7 +64,16 @@ impl KeychainStore {
 
 impl KeyStore for KeychainStore {
     fn get(&self) -> Option<String> {
-        self.entry.get_password().ok()
+        match self.entry.get_password() {
+            Ok(key) => Some(key),
+            Err(keyring::Error::NoEntry) => None,
+            Err(e) => {
+                // Диагностика: «ключа нет» и «keychain недоступен» — разные
+                // причины; в stderr, чтобы их можно было различить при разборе.
+                eprintln!("keychain: не удалось прочитать ключ CI: {e}");
+                None
+            }
+        }
     }
 
     fn set(&self, key: &str) -> Result<(), String> {

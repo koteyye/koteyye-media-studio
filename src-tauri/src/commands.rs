@@ -167,15 +167,21 @@ pub async fn cmd_delete_history(state: &AppState, id: &str) -> Result<(), String
 /// Восстанавливает `Pending`-записи, пережившие перезапуск.
 ///
 /// Вызывается и при старте (фоном, из `setup`), и вручную из UI. После
-/// восстановления завершённых записей шлёт `balance:updated`.
+/// восстановления завершённых записей шлёт `balance:updated`. Без ключа
+/// CI не опросить: записи остаются `Pending` до следующего запуска с ключом
+/// (оплаченная генерация могла завершиться на сервере, файлы живут 7 дней).
 ///
 /// # Errors
 ///
 /// Строка с причиной при сбое хранилища; ошибки CI отдельных записей
 /// переводят их в `Failed`, а не прерывают восстановление.
 pub async fn cmd_recover_pending(state: &AppState) -> Result<Vec<HistoryRecord>, String> {
+    let Some(key) = state.key_store.get() else {
+        // Без ключа запрос с пустым Bearer дал бы 401 и ядро сожгло бы
+        // восстановимые записи в Failed навсегда — оставляем Pending.
+        return Ok(Vec::new());
+    };
     let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
-    let key = state.key_store.get().unwrap_or_default();
     let jobs = state.jobs(state.client(&key), PathBuf::from(settings.local_folder))?;
     let recovered = jobs.recover_pending().await.map_err(|e| e.to_string())?;
     if recovered.iter().any(|r| r.status == JobStatus::Completed) {
@@ -334,6 +340,10 @@ pub async fn open_file(
     path: String,
 ) -> Result<(), String> {
     let target = cmd_open_file(&state, &path).await?;
+    // Windows: canonicalize даёт verbatim-путь (\\?\), а open_path ведёт в
+    // ShellExecuteExW, который такие пути не принимает; dunce снимает префикс,
+    // когда это безопасно. На macOS/Linux преобразование тождественно.
+    let target = dunce::simplified(&target);
     app.opener()
         .open_path(target.to_string_lossy(), None::<&str>)
         .map_err(|e| e.to_string())
@@ -347,7 +357,41 @@ pub async fn show_in_folder(
     path: String,
 ) -> Result<(), String> {
     let target = cmd_show_in_folder(&state, &path).await?;
+    // reveal_item_in_dir на Windows сам упрощает путь (dunce + GetFullPathNameW),
+    // поэтому verbatim-префикс canonicalize здесь не мешает.
     app.opener()
         .reveal_item_in_dir(target)
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    /// Контракт упрощения пути для shell, на котором держится `open_file`:
+    /// Windows — verbatim-префикс `\\?\` снимается, остальные платформы —
+    /// тождественное преобразование. Исполнить Windows-ветку здесь (macOS)
+    /// нельзя; она проверяется на Windows-сборке.
+    #[test]
+    fn shell_path_simplifies_verbatim_prefix_on_windows() {
+        #[cfg(windows)]
+        {
+            use std::path::Path;
+            let verbatim = PathBuf::from(r"\\?\C:\media\image.png");
+            assert_eq!(
+                dunce::simplified(&verbatim),
+                Path::new(r"C:\media\image.png"),
+                "verbatim-префикс снят для ShellExecuteExW"
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            let path = PathBuf::from("/media/image.png");
+            assert_eq!(
+                dunce::simplified(&path),
+                path,
+                "на macOS/Linux путь не меняется"
+            );
+        }
+    }
 }
