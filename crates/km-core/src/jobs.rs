@@ -4,8 +4,11 @@
 //! ([`save_media`]) в единый поток: запись истории создаётся до запроса к CI,
 //! результат сохраняется в локальную папку (локальная копия первична), статус
 //! и стоимость обновляются в БД, а UI получает события [`AppEvent`]. Записи
-//! `Pending`, пережившие перезапуск, восстанавливаются через [`CiClient::generation`];
-//! баланс гибридный — реальный из CI при наличии scope, иначе локальный расход.
+//! `Pending`, пережившие перезапуск, восстанавливаются через [`CiClient::generation`]:
+//! транзиентные ошибки (сеть, таймаут, ввод-вывод) оставляют запись `Pending`
+//! до следующего запуска, оплаченная генерация не теряется. Пустой результат
+//! или незавершённый статус видео при 200 — ошибка, а не тихий `Completed`.
+//! Баланс гибридный — реальный из CI при наличии scope, иначе локальный расход.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -84,6 +87,8 @@ impl Jobs {
     /// до скачивания файлов, поэтому краш на этапе скачивания восстановим.
     /// При ошибке или таймауте запись переводится в `Failed`, шлётся
     /// `GenerationFailed` и возвращается [`Err`] (запись `Failed` остаётся в истории).
+    /// Пустой результат CI (`data`/`videos`/`files`/аудио) или статус видео,
+    /// отличный от `completed`/`succeeded`, — ошибка [`CoreError::Serde`].
     ///
     /// # Errors
     ///
@@ -126,19 +131,31 @@ impl Jobs {
     ///
     /// Для каждой записи: с корректным `request_id` — запрос
     /// [`CiClient::generation`], скачивание и сохранение файлов, `Completed`;
-    /// без `request_id` (ответ CI не был получен) или при ошибке восстановления —
-    /// `Failed`. Возвращает обновлённые записи; сбой одной записи не прерывает
-    /// остальные. События `GenerationDone`/`GenerationFailed` шлются по исходу.
+    /// без `request_id` (ответ CI не был получен) — `Failed`. Транзиентные
+    /// ошибки (сеть, таймаут, ввод-вывод) оставляют запись `Pending`: файлы
+    /// живут на CI 7 дней, генерация восстановится при следующем запуске.
+    /// Definitive-ответы CI (404/410, пустой результат) переводят в `Failed`.
+    /// Сбой хранилища на одной записи логируется и не прерывает остальные.
+    /// Возвращает обработанные записи с итоговым статусом (оставшиеся
+    /// `Pending` — как есть). События `GenerationDone`/`GenerationFailed`
+    /// шлются по исходу.
     ///
     /// # Errors
     ///
-    /// [`CoreError::Db`] / [`CoreError::Serde`], если не удалось прочитать или
-    /// обновить хранилище; ошибки CI отдельных записей переводят их в `Failed`.
+    /// [`CoreError::Db`] / [`CoreError::Serde`], если не удалось прочитать
+    /// хранилище; ошибки отдельных записей не прерывают восстановление.
     pub async fn recover_pending(&self) -> Result<Vec<HistoryRecord>> {
         let pending = self.storage.pending()?;
         let mut updated = Vec::with_capacity(pending.len());
         for rec in pending {
-            updated.push(self.recover_one(&rec).await?);
+            match self.recover_one(&rec).await {
+                Ok(record) => updated.push(record),
+                Err(err) => {
+                    // Изоляция: сбой хранилища на одной записи не прерывает
+                    // остальные; запись остаётся Pending до следующего запуска.
+                    eprintln!("восстановление записи {}: {err}", rec.id);
+                }
+            }
         }
         Ok(updated)
     }
@@ -190,6 +207,11 @@ impl Jobs {
                     GenMode::ImageEdit => self.client.edit_image(req).await?,
                     _ => self.client.generate_image(req).await?,
                 };
+                if response.data.is_empty() {
+                    return Err(CoreError::Serde(
+                        "CI вернул пустой результат: data".to_owned(),
+                    ));
+                }
                 self.set_request_id(id, response.request_id.as_deref())?;
                 let mut files = Vec::with_capacity(response.data.len());
                 for item in &response.data {
@@ -211,6 +233,11 @@ impl Jobs {
             }
             MediaKind::Audio => {
                 let output = self.client.speech(req).await?;
+                if output.bytes.is_empty() {
+                    return Err(CoreError::Serde(
+                        "CI вернул пустой результат: аудио".to_owned(),
+                    ));
+                }
                 Ok(Generated {
                     request_id: None,
                     cost_usd: output.cost_usd,
@@ -222,6 +249,19 @@ impl Jobs {
             }
             MediaKind::Video => {
                 let response = self.client.generate_video(req).await?;
+                // CI документирует completed/succeeded как успешные статусы;
+                // всё остальное (failed, processing, …) — ошибка, не Completed.
+                if !matches!(response.status.as_str(), "completed" | "succeeded") {
+                    return Err(CoreError::Serde(format!(
+                        "CI вернул незавершённый статус видео: {}",
+                        response.status
+                    )));
+                }
+                if response.videos.is_empty() {
+                    return Err(CoreError::Serde(
+                        "CI вернул пустой результат: videos".to_owned(),
+                    ));
+                }
                 self.set_request_id(id, response.request_id.as_deref())?;
                 let mut files = Vec::with_capacity(response.videos.len());
                 for item in &response.videos {
@@ -263,6 +303,9 @@ impl Jobs {
     }
 
     /// Восстанавливает одну запись `Pending`: с id — генерация, без id — `Failed`.
+    ///
+    /// Транзиентная ошибка ([`is_transient`]) оставляет запись `Pending` без
+    /// события: оплаченная генерация жива на CI, повтор — при следующем запуске.
     async fn recover_one(&self, rec: &HistoryRecord) -> Result<HistoryRecord> {
         let Some(request_id) = rec
             .request_id
@@ -277,6 +320,10 @@ impl Jobs {
         };
         match self.fetch_and_save(rec, request_id).await {
             Ok(record) => Ok(record),
+            Err(err) if is_transient(&err) => {
+                eprintln!("восстановление записи {} отложено: {err}", rec.id);
+                Ok(rec.clone())
+            }
             Err(err) => self.fail(rec, err.to_string()),
         }
     }
@@ -284,6 +331,11 @@ impl Jobs {
     /// Запрашивает файлы генерации, скачивает и сохраняет их, завершая запись.
     async fn fetch_and_save(&self, rec: &HistoryRecord, request_id: &str) -> Result<HistoryRecord> {
         let generation = self.client.generation(request_id).await?;
+        if generation.files.is_empty() {
+            return Err(CoreError::Serde(
+                "CI вернул пустой результат: files".to_owned(),
+            ));
+        }
         let total = generation.files.len();
         let mut local_paths = Vec::with_capacity(total);
         for (index, file) in generation.files.iter().enumerate() {
@@ -360,7 +412,15 @@ impl Jobs {
             error: Some(error.clone()),
             ..HistoryPatch::default()
         };
-        self.storage.update_history(&rec.id, &patch)?;
+        if let Err(db_err) = self.storage.update_history(&rec.id, &patch) {
+            // Исходная ошибка генерации не должна потеряться, если БД не
+            // приняла Failed: логируем обе, контракт возврата прежний.
+            eprintln!(
+                "запись {}: не удалось сохранить Failed ({db_err}); исходная ошибка: {error}",
+                rec.id
+            );
+            return Err(db_err);
+        }
         (self.emit)(AppEvent::GenerationFailed {
             history_id: rec.id.clone(),
             error,
@@ -405,6 +465,20 @@ fn normalize_content_type(content_type: &str) -> String {
         .to_lowercase()
 }
 
+/// Транзиентная ли ошибка: сеть, таймаут или локальный ввод-вывод.
+///
+/// При таких ошибках recovery оставляет запись `Pending` — оплаченная
+/// генерация жива на CI (файлы 7 дней), повтор при следующем запуске имеет
+/// смысл. Definitive-ответы CI ([`CoreError::Http`], [`CoreError::Serde`]),
+/// ошибки БД и валидации транзиентными не считаются: запись переводится
+/// в `Failed` (контракт «ошибка CI → Failed» для definitive-ответов).
+fn is_transient(err: &CoreError) -> bool {
+    matches!(
+        err,
+        CoreError::Network(_) | CoreError::Timeout | CoreError::Io(_)
+    )
+}
+
 /// Допустим ли `request_id` для подстановки в URL recovery-эндпоинта.
 ///
 /// Defense-in-depth: только непустые ASCII-буквы/цифры, `-` и `_` (UUID и id
@@ -444,6 +518,32 @@ mod tests {
         assert_eq!(normalize_content_type(" IMAGE/JPEG "), "image/jpeg");
         assert_eq!(normalize_content_type("audio/mpeg"), "audio/mpeg");
         assert_eq!(normalize_content_type(""), "");
+    }
+
+    #[test]
+    fn transient_errors_are_network_timeout_io_only() {
+        assert!(is_transient(&CoreError::Network("обрыв".to_owned())));
+        assert!(is_transient(&CoreError::Timeout));
+        assert!(is_transient(&CoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "нет прав",
+        ))));
+        // Definitive-ответы CI и ошибки БД/валидации — не транзиентные.
+        assert!(!is_transient(&CoreError::Http {
+            status: 404,
+            code: None,
+            message: "not found".to_owned(),
+        }));
+        assert!(!is_transient(&CoreError::Http {
+            status: 500,
+            code: None,
+            message: "boom".to_owned(),
+        }));
+        assert!(!is_transient(&CoreError::Serde("пустой ответ".to_owned())));
+        assert!(!is_transient(&CoreError::Db("locked".to_owned())));
+        assert!(!is_transient(&CoreError::Validation("нет id".to_owned())));
+        assert!(!is_transient(&CoreError::ScopeMissing));
+        assert!(!is_transient(&CoreError::NoKey));
     }
 
     #[test]

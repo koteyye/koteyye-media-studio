@@ -15,9 +15,14 @@ pub struct Billing {
 }
 
 impl Billing {
-    /// Стоимость в USD числом; `None`, если поле отсутствует или не парсится.
+    /// Стоимость в USD числом; `None`, если поле отсутствует, не парсится
+    /// или некорректно (NaN, бесконечность, отрицательное значение).
     pub fn cost_usd(&self) -> Option<f64> {
-        self.billed_cost_usd.as_deref()?.parse::<f64>().ok()
+        self.billed_cost_usd
+            .as_deref()?
+            .parse::<f64>()
+            .ok()
+            .filter(|c| c.is_finite() && *c >= 0.0)
     }
 }
 

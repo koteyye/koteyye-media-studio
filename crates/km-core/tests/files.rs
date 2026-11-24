@@ -199,6 +199,32 @@ fn ensure_folder_keeps_existing_directory() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn save_media_write_error_includes_file_path() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().expect("tempdir создаётся");
+    let folder = dir.path().join("media");
+    fs::create_dir(&folder).expect("папка создаётся");
+    // Read-only папка: ensure_folder проходит, fs::write падает с Io.
+    fs::set_permissions(&folder, fs::Permissions::from_mode(0o555)).expect("chmod 555");
+    let result = save_media(&folder, MediaKind::Image, 0, 1, b"data", "image/png");
+    // Права возвращаются до ассертов, чтобы TempDir смог удалиться.
+    fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).expect("chmod 755");
+
+    let err = result.expect_err("запись в read-only папку — ошибка");
+    assert!(
+        matches!(err, CoreError::Io(_)),
+        "ожидался CoreError::Io, получен {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("media") && msg.contains("image-") && msg.contains(".png"),
+        "ошибка должна содержать путь файла: {msg}"
+    );
+}
+
 #[test]
 fn ext_for_maps_known_content_types_and_falls_back_to_bin() {
     let cases = [

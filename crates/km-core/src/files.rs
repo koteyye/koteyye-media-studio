@@ -55,7 +55,13 @@ pub fn save_media(
 ) -> Result<PathBuf> {
     ensure_folder(folder)?;
     let path = folder.join(file_name(kind, index, total, content_type));
-    fs::write(&path, bytes)?;
+    fs::write(&path, bytes).map_err(|e| {
+        // Io-ошибка сама по себе не несёт пути: добавляем его в сообщение.
+        CoreError::Io(io::Error::new(
+            e.kind(),
+            format!("не удалось записать файл {}: {e}", path.display()),
+        ))
+    })?;
     Ok(path)
 }
 

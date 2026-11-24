@@ -8,12 +8,18 @@ use km_shared::{
 #[test]
 fn billing_cost_usd_parses_string_with_six_decimals() {
     // Строка с 6 знаками парсится в f64; null/отсутствие/мусор дают None, не панику.
+    // NaN/inf/отрицательные стоимости тоже None: расход не может быть таким.
     let cases = [
         (r#"{"billed_cost_usd":"0.123456"}"#, Some(0.123456)),
         (r#"{"billed_cost_usd":"0.000000"}"#, Some(0.0)),
         (r#"{}"#, None),
         (r#"{"billed_cost_usd":"abc"}"#, None),
         (r#"{"billed_cost_usd":null}"#, None),
+        (r#"{"billed_cost_usd":"NaN"}"#, None),
+        (r#"{"billed_cost_usd":"inf"}"#, None),
+        (r#"{"billed_cost_usd":"-inf"}"#, None),
+        (r#"{"billed_cost_usd":"1e309"}"#, None),
+        (r#"{"billed_cost_usd":"-0.040000"}"#, None),
     ];
     for (json, expected) in cases {
         let billing: Billing =

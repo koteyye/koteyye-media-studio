@@ -772,6 +772,614 @@ async fn completed_history_not_recovered_and_delete_is_local_only() {
     );
 }
 
+#[tokio::test]
+async fn recover_pending_download_network_error_keeps_pending_for_retry() {
+    let server = MockServer::start().await;
+    // Generation OK, но ссылка на файл ведёт на закрытый порт: соединение
+    // отклонено -> CoreError::Network. Оплаченная генерация жива на CI,
+    // запись обязана остаться Pending и восстановиться при следующем запуске.
+    let guard = Mock::given(method("GET"))
+        .and(path("/v1/generations/req_net"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "request_id": "req_net",
+            "endpoint": "/v1/videos/generations",
+            "created_at": "2026-11-24T10:00:00Z",
+            "expires_at": "2026-12-01T10:00:00Z",
+            "files": [{
+                "index": 0, "type": "video", "content_type": "video/mp4",
+                "size_bytes": 2, "url": "http://127.0.0.1:1/signed/v.mp4",
+            }],
+        })))
+        .expect(1)
+        .mount_as_scoped(&server)
+        .await;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("h.db");
+    let storage = Storage::open(&db).expect("БД");
+    let reader = Storage::open(&db).expect("reader");
+    let mut rec = history_record(
+        "net",
+        MediaKind::Video,
+        GenMode::TextToVideo,
+        JobStatus::Pending,
+    );
+    rec.request_id = Some("req_net".to_owned());
+    storage.insert_history(&rec).expect("insert");
+    let (jobs, events) = jobs_with(client_for(&server), storage, tmp.path().join("media"));
+
+    let recovered = jobs.recover_pending().await.expect("recover");
+    assert_eq!(recovered.len(), 1, "запись обработана");
+    assert_eq!(
+        recovered[0].status,
+        JobStatus::Pending,
+        "Network при скачивании не сжигает оплаченную генерацию"
+    );
+    assert_eq!(
+        recovered[0].request_id.as_deref(),
+        Some("req_net"),
+        "request_id сохранён для следующей попытки"
+    );
+    let history = reader.history(&all()).expect("history");
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].status, JobStatus::Pending, "в БД запись Pending");
+    assert!(
+        events.lock().expect("lock").is_empty(),
+        "ни Done, ни Failed при транзиентной ошибке"
+    );
+    drop(guard);
+
+    // Следующий запуск: ссылка живая — та же запись восстанавливается.
+    let file_url = format!("{}/signed/ok.mp4", server.uri());
+    Mock::given(method("GET"))
+        .and(path("/v1/generations/req_net"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "request_id": "req_net",
+            "endpoint": "/v1/videos/generations",
+            "created_at": "2026-11-24T10:00:00Z",
+            "expires_at": "2026-12-01T10:00:00Z",
+            "files": [{
+                "index": 0, "type": "video", "content_type": "video/mp4",
+                "size_bytes": 2, "url": file_url,
+            }],
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/signed/ok.mp4"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"hi"))
+        .mount(&server)
+        .await;
+
+    let recovered = jobs.recover_pending().await.expect("повторный recover");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(
+        recovered[0].status,
+        JobStatus::Completed,
+        "повторная попытка завершает запись"
+    );
+    assert_eq!(
+        std::fs::read(&recovered[0].local_paths[0]).expect("файл"),
+        b"hi"
+    );
+}
+
+#[tokio::test]
+async fn recover_pending_download_timeout_keeps_pending() {
+    let server = MockServer::start().await;
+    let file_url = format!("{}/signed/slow.png", server.uri());
+    Mock::given(method("GET"))
+        .and(path("/v1/generations/req_slow"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "request_id": "req_slow",
+            "endpoint": "/v1/images/generations",
+            "created_at": "2026-11-24T10:00:00Z",
+            "expires_at": "2026-12-01T10:00:00Z",
+            "files": [{
+                "index": 0, "type": "image", "content_type": "image/png",
+                "size_bytes": 2, "url": file_url,
+            }],
+        })))
+        .mount(&server)
+        .await;
+    // Скачивание медленнее клиентского таймаута 100 мс -> CoreError::Timeout.
+    let guard = Mock::given(method("GET"))
+        .and(path("/signed/slow.png"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(b"hi")
+                .set_delay(Duration::from_millis(500)),
+        )
+        .expect(1)
+        .mount_as_scoped(&server)
+        .await;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("h.db");
+    let storage = Storage::open(&db).expect("БД");
+    let reader = Storage::open(&db).expect("reader");
+    let mut rec = history_record(
+        "slow",
+        MediaKind::Image,
+        GenMode::TextToImage,
+        JobStatus::Pending,
+    );
+    rec.request_id = Some("req_slow".to_owned());
+    storage.insert_history(&rec).expect("insert");
+    let client = client_for(&server).with_timeout(Duration::from_millis(100));
+    let (jobs, events) = jobs_with(client, storage, tmp.path().join("media"));
+
+    let recovered = jobs.recover_pending().await.expect("recover");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(
+        recovered[0].status,
+        JobStatus::Pending,
+        "Timeout при скачивании не сжигает оплаченную генерацию"
+    );
+    assert_eq!(recovered[0].request_id.as_deref(), Some("req_slow"));
+    let history = reader.history(&all()).expect("history");
+    assert_eq!(history[0].status, JobStatus::Pending, "в БД запись Pending");
+    assert!(events.lock().expect("lock").is_empty(), "событий нет");
+
+    drop(guard);
+}
+
+#[tokio::test]
+async fn recover_pending_io_error_keeps_pending() {
+    let server = MockServer::start().await;
+    let file_url = format!("{}/signed/v.mp4", server.uri());
+    Mock::given(method("GET"))
+        .and(path("/v1/generations/req_io"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "request_id": "req_io",
+            "endpoint": "/v1/videos/generations",
+            "created_at": "2026-11-24T10:00:00Z",
+            "expires_at": "2026-12-01T10:00:00Z",
+            "files": [{
+                "index": 0, "type": "video", "content_type": "video/mp4",
+                "size_bytes": 2, "url": file_url,
+            }],
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/signed/v.mp4"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"hi"))
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("h.db");
+    let storage = Storage::open(&db).expect("БД");
+    let reader = Storage::open(&db).expect("reader");
+    let mut rec = history_record(
+        "io",
+        MediaKind::Video,
+        GenMode::TextToVideo,
+        JobStatus::Pending,
+    );
+    rec.request_id = Some("req_io".to_owned());
+    storage.insert_history(&rec).expect("insert");
+    // Папка сохранения занята файлом: ensure_folder -> CoreError::Io.
+    let folder = tmp.path().join("media");
+    std::fs::write(&folder, b"not a folder").expect("файл-заглушка");
+    let (jobs, events) = jobs_with(client_for(&server), storage, folder);
+
+    let recovered = jobs.recover_pending().await.expect("recover");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(
+        recovered[0].status,
+        JobStatus::Pending,
+        "недоступная папка не сжигает оплаченную генерацию"
+    );
+    assert_eq!(recovered[0].request_id.as_deref(), Some("req_io"));
+    let history = reader.history(&all()).expect("history");
+    assert_eq!(history[0].status, JobStatus::Pending, "в БД запись Pending");
+    assert!(events.lock().expect("lock").is_empty(), "событий нет");
+}
+
+#[tokio::test]
+async fn recover_pending_generation_410_marks_failed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/generations/req_expired"))
+        .respond_with(ResponseTemplate::new(410).set_body_json(json!({
+            "error": {"code": "gone", "message": "generation files expired"},
+        })))
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let storage = Storage::open(&tmp.path().join("h.db")).expect("БД");
+    let mut rec = history_record(
+        "expired",
+        MediaKind::Video,
+        GenMode::TextToVideo,
+        JobStatus::Pending,
+    );
+    rec.request_id = Some("req_expired".to_owned());
+    storage.insert_history(&rec).expect("insert");
+    let (jobs, events) = jobs_with(client_for(&server), storage, tmp.path().join("media"));
+
+    let recovered = jobs.recover_pending().await.expect("recover");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(
+        recovered[0].status,
+        JobStatus::Failed,
+        "410 — definitive-ответ CI: файлы истекли"
+    );
+    assert!(
+        recovered[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("410")
+    );
+    let events = events.lock().expect("lock").clone();
+    assert!(matches!(events[0], AppEvent::GenerationFailed { .. }));
+}
+
+#[tokio::test]
+async fn run_image_empty_data_marks_failed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/images/generations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [],
+            "request_id": "img_empty",
+            "billing": {"billed_cost_usd": "0.040000"},
+        })))
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("h.db");
+    let storage = Storage::open(&db).expect("БД");
+    let reader = Storage::open(&db).expect("reader");
+    let (jobs, events) = jobs_with(client_for(&server), storage, tmp.path().join("media"));
+
+    let err = jobs
+        .run(image_request())
+        .await
+        .expect_err("пустой data при 200 — ошибка, а не Completed");
+    assert!(
+        matches!(err, CoreError::Serde(_)),
+        "ожидался Serde: {err:?}"
+    );
+    let history = reader.history(&all()).expect("history");
+    assert_eq!(history.len(), 1);
+    assert_eq!(
+        history[0].status,
+        JobStatus::Failed,
+        "пустой результат -> Failed"
+    );
+    assert!(
+        history[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("пустой"),
+        "ошибка про пустой результат: {:?}",
+        history[0].error
+    );
+    assert!(history[0].local_paths.is_empty(), "файлов нет");
+    let events = events.lock().expect("lock").clone();
+    assert!(matches!(events[1], AppEvent::GenerationFailed { .. }));
+}
+
+#[tokio::test]
+async fn run_video_empty_videos_marks_failed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/videos/generations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "vid_empty",
+            "status": "completed",
+            "videos": [],
+            "request_id": "req_empty",
+            "billing": {"billed_cost_usd": "0.600000"},
+        })))
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("h.db");
+    let storage = Storage::open(&db).expect("БД");
+    let reader = Storage::open(&db).expect("reader");
+    let (jobs, _events) = jobs_with(client_for(&server), storage, tmp.path().join("media"));
+
+    let err = jobs
+        .run(video_request())
+        .await
+        .expect_err("пустой videos при 200 — ошибка");
+    assert!(
+        matches!(err, CoreError::Serde(_)),
+        "ожидался Serde: {err:?}"
+    );
+    let history = reader.history(&all()).expect("history");
+    assert_eq!(history[0].status, JobStatus::Failed);
+    assert!(
+        history[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("пустой")
+    );
+    assert!(history[0].local_paths.is_empty());
+}
+
+#[tokio::test]
+async fn run_video_non_completed_status_marks_failed_without_download() {
+    for status in ["failed", "processing"] {
+        let server = MockServer::start().await;
+        let video_url = format!("{}/signed/v.mp4", server.uri());
+        Mock::given(method("POST"))
+            .and(path("/v1/videos/generations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "vid_bad",
+                "status": status,
+                "videos": [{"url": video_url, "content_type": "video/mp4"}],
+                "request_id": "req_bad",
+            })))
+            .mount(&server)
+            .await;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let db = tmp.path().join("h.db");
+        let storage = Storage::open(&db).expect("БД");
+        let reader = Storage::open(&db).expect("reader");
+        let (jobs, _events) = jobs_with(client_for(&server), storage, tmp.path().join("media"));
+
+        let err = jobs
+            .run(video_request())
+            .await
+            .expect_err("non-completed статус — ошибка");
+        assert!(
+            matches!(err, CoreError::Serde(_)),
+            "ожидался Serde: {err:?}"
+        );
+        let history = reader.history(&all()).expect("history");
+        assert_eq!(history[0].status, JobStatus::Failed, "статус {status}");
+        assert!(
+            history[0]
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains(status),
+            "ошибка содержит статус CI: {:?}",
+            history[0].error
+        );
+        assert!(history[0].local_paths.is_empty());
+        // Скачивание не начинается: статус проверен до файлов.
+        let requests = received(&server).await;
+        assert!(
+            requests.iter().all(|r| r.url.path() != "/signed/v.mp4"),
+            "при статусе {status} файл не скачивается"
+        );
+    }
+}
+
+#[tokio::test]
+async fn run_video_status_succeeded_completes() {
+    let server = MockServer::start().await;
+    let video_url = format!("{}/signed/v.mp4", server.uri());
+    Mock::given(method("POST"))
+        .and(path("/v1/videos/generations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "vid_ok",
+            "status": "succeeded",
+            "videos": [{"url": video_url, "content_type": "video/mp4"}],
+            "request_id": "req_ok",
+            "billing": {"billed_cost_usd": "0.600000"},
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/signed/v.mp4"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"video"))
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let storage = Storage::open(&tmp.path().join("h.db")).expect("БД");
+    let (jobs, _events) = jobs_with(client_for(&server), storage, tmp.path().join("media"));
+
+    let rec = jobs
+        .run(video_request())
+        .await
+        .expect("succeeded — успешный статус наравне с completed");
+    assert_eq!(rec.status, JobStatus::Completed);
+    assert_eq!(rec.local_paths.len(), 1);
+    assert_eq!(std::fs::read(&rec.local_paths[0]).expect("файл"), b"video");
+}
+
+#[tokio::test]
+async fn run_audio_empty_body_marks_failed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/speech"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(Vec::<u8>::new())
+                .insert_header("content-type", "audio/mpeg"),
+        )
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("h.db");
+    let storage = Storage::open(&db).expect("БД");
+    let reader = Storage::open(&db).expect("reader");
+    let (jobs, _events) = jobs_with(client_for(&server), storage, tmp.path().join("media"));
+
+    let err = jobs
+        .run(speech_request())
+        .await
+        .expect_err("пустое аудио при 200 — ошибка");
+    assert!(
+        matches!(err, CoreError::Serde(_)),
+        "ожидался Serde: {err:?}"
+    );
+    let history = reader.history(&all()).expect("history");
+    assert_eq!(history[0].status, JobStatus::Failed);
+    assert!(
+        history[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("пустой")
+    );
+    assert!(history[0].local_paths.is_empty());
+}
+
+#[tokio::test]
+async fn recover_pending_empty_files_marks_failed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/generations/req_empty"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "request_id": "req_empty",
+            "endpoint": "/v1/videos/generations",
+            "created_at": "2026-11-24T10:00:00Z",
+            "expires_at": "2026-12-01T10:00:00Z",
+            "files": [],
+        })))
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("h.db");
+    let storage = Storage::open(&db).expect("БД");
+    let reader = Storage::open(&db).expect("reader");
+    let mut rec = history_record(
+        "empty",
+        MediaKind::Video,
+        GenMode::TextToVideo,
+        JobStatus::Pending,
+    );
+    rec.request_id = Some("req_empty".to_owned());
+    storage.insert_history(&rec).expect("insert");
+    let (jobs, events) = jobs_with(client_for(&server), storage, tmp.path().join("media"));
+
+    let recovered = jobs.recover_pending().await.expect("recover");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(
+        recovered[0].status,
+        JobStatus::Failed,
+        "пустой files — definitive-ответ CI, не транзиентная ошибка"
+    );
+    assert!(
+        recovered[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("пустой")
+    );
+    let history = reader.history(&all()).expect("history");
+    assert_eq!(history[0].status, JobStatus::Failed);
+    let events = events.lock().expect("lock").clone();
+    assert!(matches!(events[0], AppEvent::GenerationFailed { .. }));
+}
+
+#[tokio::test]
+async fn recover_pending_db_error_isolates_records_and_keeps_them_recoverable() {
+    let server = MockServer::start().await;
+    // rec_a: definitive 404 -> fail() упрётся в заблокированную БД.
+    Mock::given(method("GET"))
+        .and(path("/v1/generations/req_a"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "error": {"code": "not_found", "message": "generation not found"},
+        })))
+        .mount(&server)
+        .await;
+    // rec_b: generation OK -> complete() упрётся в заблокированную БД.
+    let file_url = format!("{}/signed/b.mp4", server.uri());
+    Mock::given(method("GET"))
+        .and(path("/v1/generations/req_b"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "request_id": "req_b",
+            "endpoint": "/v1/videos/generations",
+            "created_at": "2026-11-24T10:00:00Z",
+            "expires_at": "2026-12-01T10:00:00Z",
+            "files": [{
+                "index": 0, "type": "video", "content_type": "video/mp4",
+                "size_bytes": 2, "url": file_url,
+            }],
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/signed/b.mp4"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"hi"))
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("h.db");
+    let storage = Storage::open(&db).expect("БД");
+    let reader = Storage::open(&db).expect("reader");
+    for (id, request_id) in [("a", "req_a"), ("b", "req_b")] {
+        let mut rec = history_record(
+            id,
+            MediaKind::Video,
+            GenMode::TextToVideo,
+            JobStatus::Pending,
+        );
+        rec.request_id = Some(request_id.to_owned());
+        storage.insert_history(&rec).expect("insert");
+    }
+    let (jobs, _events) = jobs_with(client_for(&server), storage, tmp.path().join("media"));
+
+    // Третье соединение держит write-лок (BEGIN IMMEDIATE): чтение pending
+    // проходит, а обновления записей получают SQLITE_BUSY (busy timeout 5 с).
+    let locker = rusqlite::Connection::open(&db).expect("соединение-лок");
+    locker
+        .execute_batch("BEGIN IMMEDIATE;")
+        .expect("write-лок должен захватиться");
+
+    let recovered = jobs
+        .recover_pending()
+        .await
+        .expect("сбой БД одной записи не прерывает восстановление");
+    assert!(
+        recovered.is_empty(),
+        "записи с ошибкой БД не попадают в обновлённые"
+    );
+    // Изоляция: обработаны ОБЕ записи, а не только первая.
+    let requests = received(&server).await;
+    assert!(
+        requests
+            .iter()
+            .any(|r| r.url.path() == "/v1/generations/req_a"),
+        "первая запись обработана"
+    );
+    assert!(
+        requests
+            .iter()
+            .any(|r| r.url.path() == "/v1/generations/req_b"),
+        "вторая запись обработана несмотря на ошибку БД первой"
+    );
+    // Записи не потеряны и не сожжены: остались Pending до следующего запуска.
+    let history = reader.history(&all()).expect("history");
+    assert_eq!(history.len(), 2);
+    assert!(
+        history.iter().all(|r| r.status == JobStatus::Pending),
+        "записи остаются Pending при сбое БД"
+    );
+
+    locker.execute_batch("ROLLBACK;").expect("лок снимается");
+    drop(locker);
+
+    // Следующий запуск без лока: обе записи доходят до верного исхода.
+    let recovered = jobs.recover_pending().await.expect("повторный recover");
+    assert_eq!(recovered.len(), 2);
+    let a = recovered.iter().find(|r| r.id == "a").expect("запись a");
+    assert_eq!(a.status, JobStatus::Failed, "404 -> Failed");
+    let b = recovered.iter().find(|r| r.id == "b").expect("запись b");
+    assert_eq!(b.status, JobStatus::Completed, "generation OK -> Completed");
+    assert_eq!(std::fs::read(&b.local_paths[0]).expect("файл"), b"hi");
+}
+
 #[test]
 fn run_future_is_send() {
     fn assert_send<T: Send>(_: T) {}

@@ -168,8 +168,9 @@ pub async fn cmd_delete_history(state: &AppState, id: &str) -> Result<(), String
 ///
 /// Вызывается и при старте (фоном, из `setup`), и вручную из UI. После
 /// восстановления завершённых записей шлёт `balance:updated`. Без ключа
-/// CI не опросить: записи остаются `Pending` до следующего запуска с ключом
-/// (оплаченная генерация могла завершиться на сервере, файлы живут 7 дней).
+/// CI не опросить, без папки сохранения некуда писать файлы: записи остаются
+/// `Pending` до следующего запуска с ключом и папкой (оплаченная генерация
+/// могла завершиться на сервере, файлы живут 7 дней).
 ///
 /// # Errors
 ///
@@ -182,6 +183,11 @@ pub async fn cmd_recover_pending(state: &AppState) -> Result<Vec<HistoryRecord>,
         return Ok(Vec::new());
     };
     let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
+    if settings.local_folder.is_empty() {
+        // Пустой путь записи файлов увёл бы в working directory — как
+        // cmd_generate, не пишем без папки; записи остаются Pending.
+        return Ok(Vec::new());
+    }
     let jobs = state.jobs(state.client(&key), PathBuf::from(settings.local_folder))?;
     let recovered = jobs.recover_pending().await.map_err(|e| e.to_string())?;
     if recovered.iter().any(|r| r.status == JobStatus::Completed) {

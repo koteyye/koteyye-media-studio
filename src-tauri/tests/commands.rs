@@ -642,6 +642,77 @@ async fn recover_pending_without_key_keeps_records_pending() {
 }
 
 #[tokio::test]
+async fn recover_pending_without_folder_keeps_pending_and_no_cwd_files() {
+    let server = MockServer::start().await;
+    // Без папки сохранения запросов к CI быть не должно: пустой путь записи
+    // файлов увёл бы в working directory, а записи должны дождаться папки.
+    let guard = Mock::given(method("GET"))
+        .and(path("/v1/generations/req_crash"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount_as_scoped(&server)
+        .await;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let (state, events) = state_for(&server, &tmp, Some("ci_live_test"));
+    // Папка сохранения не задана (пустая в настройках по умолчанию).
+    let mut rec = history_record("crashed", JobStatus::Pending);
+    rec.request_id = Some("req_crash".to_owned());
+    state.storage.insert_history(&rec).expect("запись");
+
+    let cwd = std::env::current_dir().expect("cwd");
+    let before = media_entries(&cwd);
+
+    let recovered = cmd_recover_pending(&state)
+        .await
+        .expect("recover без папки не ошибка");
+    assert!(
+        recovered.is_empty(),
+        "без папки ничего не восстанавливается"
+    );
+
+    let history = state
+        .storage
+        .history(&HistoryFilter::default())
+        .expect("история");
+    assert_eq!(history.len(), 1, "запись на месте");
+    assert_eq!(
+        history[0].status,
+        JobStatus::Pending,
+        "запись не сжигается без папки сохранения"
+    );
+    assert_eq!(
+        history[0].request_id.as_deref(),
+        Some("req_crash"),
+        "request_id сохранён"
+    );
+    assert!(received(&server).await.is_empty(), "запрос к CI не идёт");
+    assert!(events.lock().expect("lock").is_empty(), "событий нет");
+    assert_eq!(
+        media_entries(&cwd),
+        before,
+        "файлы не создаются в working directory"
+    );
+
+    drop(guard);
+}
+
+/// Имена медиа-файлов (`image-*`/`video-*`/`audio-*`) в директории — для
+/// проверки, что recovery с пустой папкой не пишет файлы в CWD.
+fn media_entries(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("директория читается")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| {
+            name.starts_with("image-") || name.starts_with("video-") || name.starts_with("audio-")
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
 async fn open_file_inside_folder_returns_canonical_path() {
     let server = MockServer::start().await;
     let tmp = TempDir::new().expect("tempdir");
