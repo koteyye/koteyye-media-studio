@@ -1,44 +1,42 @@
 <p align="center">
-  <img src="https://github.com/koteyye/koteyye-media-studio/blob/main/src/assets/icons/koteyye_media_studio_logo.png?raw=true" width="128" alt="Koteyye media studio" />
+  <img src="ui/assets/icons/koteyye_media_studio_logo.png" width="128" alt="Koteyye Media Studio" />
 </p>
 
-# Koteyye media studio
+# Koteyye Media Studio 2.0
 
-A sleek desktop application for AI-powered media generation — images and videos — using the [OpenRouter](https://openrouter.ai) platform. No cloud subscriptions, no usage limits beyond your own API credits. Just pick a model, describe what you want, and hit generate.
+Десктопная студия AI-генерации медиа на **Tauri 2 + Rust**: изображения, видео и
+аудио через единственного провайдера — [Cheaper Inference](https://cheaperinference.com).
+Свой API-ключ, оплата только за фактические генерации, все результаты сохраняются
+локально. От Electron и OpenRouter не остаётся ничего.
 
-## What It Can Do
+## Возможности
 
-### Text-to-Image
-Turn any text prompt into high-quality images using models like Flux, Stable Diffusion, and DALL-E.
+- **Изображения** — генерация по тексту и редактирование по референсам (маска — загрузка PNG).
+- **Видео** — text-to-video, image-to-video (первый кадр), reference-to-video.
+- **Аудио** — озвучка (выбор голоса), музыка, звуковые эффекты.
+- **Локальное сохранение** — каждый результат автоматически пишется в выбранную папку;
+  локальная копия первична (CI хранит файлы лишь 7 дней).
+- **История** — SQLite: статусы, стоимость, локальные пути, поиск и фильтры.
+- **Надёжность** — долгие видеогенерации не блокируют UI и переживают перезапуск:
+  незавершённые записи восстанавливаются через `GET /v1/generations/{request_id}`,
+  транзиентные сбои не сжигают оплаченные генерации.
+- **Баланс** — реальный из CI (при scope `account:read`) плюс локальный расход.
+- Ключ API хранится в системном keychain, не в БД. Локализация ru/en, две темы.
 
-### Image-to-Image
-Upload a source image and transform it — change style, add details, or reimagine the scene entirely.
+## Статус
 
-### Text-to-Video
-Generate short video clips from text descriptions. Describe the scene, pick duration, and watch it come to life.
+- **Ядро готово (План 1):** Rust-ядро (`km-core`, `km-shared`), Tauri-команды,
+  SQLite-хранилище, keychain, recovery, тесты.
+- **UI в разработке (План 2):** интерфейс на Dioxus (WASM) внутри webview Tauri.
+- **Релизный CI — План 2:** сборка installers, подпись и автообновление через
+  GitHub Releases будут настроены вместе с UI (старый Electron-workflow удалён).
 
-### Image-to-Video
-Provide a starting frame, add a prompt, and let AI animate the rest. Perfect for bringing static images to life.
+## Структура
 
-## Highlights
-
-- **Your API key, your rules.** Connect your own OpenRouter account and pay only for what you generate. No middleman markup.
-- **Works in Russia without VPN.** Built-in ImgBB integration for stable frame uploads in restricted regions.
-- **Everything saved locally.** All generated media downloads straight to a folder on your computer — instant access, no cloud dependency.
-- **Generation history.** Every creation is tracked locally. Revisit, replay, or delete anything anytime.
-- **Multi-language UI.** Switch between Russian and English on the fly.
-
-## Screenshots
-
-<p align="center">
-  <img src="https://github.com/koteyye/koteyye-media-studio/blob/main/src/assets/images/screen_media_studio.png?raw=true" alt="Koteyye media studio screenshot" width="800" />
-</p>
-
-## Powered By
-
-- [OpenRouter](https://openrouter.ai) — unified API for hundreds of AI models
-- Built with Electron & React
-
+- `crates/km-shared` — типы запросов/ответов CI, история, события, настройки.
+- `crates/km-core` — HTTP-клиент CI, генерация, файлы, SQLite, оркестратор джобов.
+- `src-tauri` — оболочка Tauri 2: команды, события, keychain.
+- `ui` — Dioxus-интерфейс (WASM), в разработке.
 
 ---
 © 2026 [Koteyye Eco System](https://kotey-ye.ru)

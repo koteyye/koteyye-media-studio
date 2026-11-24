@@ -1,0 +1,20 @@
+# Workspace Koteyye Media Studio 2.0: ядро на Rust, UI на Dioxus (WASM), оболочка Tauri 2.
+[workspace]
+members = [
+    "crates/km-shared",
+    "crates/km-core",
+    "src-tauri",
+    "ui",
+]
+resolver = "2"
+
+[workspace.package]
+version = "2.0.0"
+edition = "2024"
+license = "MIT"
+
+# Версии запинены по последним stable; точные версии фиксирует Cargo.lock.
+[workspace.dependencies]
+tauri = "2.12.7"
+tauri-build = "2.7.6"
+dioxus = "0.7.10"
