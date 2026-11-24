@@ -9,12 +9,15 @@
 //! через [`CiClient::speech`]. Видео генерируется синхронно
 //! ([`CiClient::generate_video`]), восстановление завершённых генераций —
 //! [`CiClient::generation`]. История, расход и настройки хранятся в SQLite
-//! ([`Storage`]).
+//! ([`Storage`]). Результаты генераций сохраняются в локальную папку
+//! ([`save_media`], [`ensure_folder`]), расширения подбираются по
+//! content-type ([`ext_for`]).
 
 mod audio;
 mod catalog;
 mod client;
 mod error;
+mod files;
 mod images;
 mod storage;
 mod video;
@@ -22,5 +25,6 @@ mod video;
 pub use catalog::{CatalogCache, by_kind, for_mode};
 pub use client::CiClient;
 pub use error::CoreError;
+pub use files::{ensure_folder, ext_for, save_media};
 pub use images::image_bytes;
 pub use storage::Storage;
