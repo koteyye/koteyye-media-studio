@@ -14,8 +14,10 @@
 
 ## Цели
 
-1. Новое приложение на Tauri 2: Rust-ядро + React/TypeScript frontend. От Electron
-   не остаётся ничего.
+1. Новое приложение целиком на Rust: Tauri 2 (ядро) + Dioxus (UI, компилируется
+   в WASM и работает внутри webview Tauri). От Electron не остаётся ничего.
+   JavaScript/TypeScript нет; допустимы минимальные wasm-bindgen-обёртки над
+   web--API (canvas, Web Audio), если без них не обойтись.
 2. Единственный провайдер — Cheaper Inference (`https://api.cheaperinference.com`):
    - **Изображения**: генерация (`POST /v1/images/generations`) и редактирование
      по референсам (`POST /v1/images/edits`, JSON-вариант с `input_references`).
@@ -71,32 +73,35 @@
   - Изображения: `n` 1–10, `size`, `quality`, `response_format`; edits —
     `input_references: string[]` (URL или data-URL), `mask_reference`.
 - **Платформы**: macOS и Windows (как у старого приложения).
-- **Стек**: Tauri 2 (стабильный), Rust stable, React + TypeScript + Vite.
+- **Стек**: Tauri 2 (стабильный), Rust stable, Dioxus (WASM frontend), Vite не
+  используется — сборка UI через `dx`/trunk.
 - Ключ и настройки хранятся локально; ключ — по возможности в системном keychain.
 
 ## Подходы к архитектуре
 
-### A · React + «толстое» Rust-ядро — выбран
+### C · Полностью Rust (Tauri + Dioxus) — выбран пользователем
 
-Frontend на React + TS (знакомый стек старого приложения, Tauri отлично работает
-с React). Rust отвечает за HTTP-клиент CI, долгие синхронные видеозапросы с
-ретраями и восстановлением, сохранение файлов, историю в SQLite, кэш каталога.
-Rust шлёт события в UI (прогресс, завершение, ошибки). Frontend — UI и локальное
-состояние (Zustand).
+Всё приложение на Rust: ядро Tauri (HTTP, файлы, история, джобы) и UI на Dioxus,
+который компилируется в WASM и рендерится в webview Tauri. Один язык, один
+инструментарий, максимальная отдача от Rust-скиллов.
 
-Почему: каждый язык делает своё сильное дело; долгие генерации надёжны; UI-наработки
-старого приложения (i18n, плееры, формы) переносятся концептуально.
+Почему выбран: осознанное решение пользователя — «Rust + Tauri, всё на нём».
+Dioxus даёт компонентную модель (сигналы, хуки, RSX), близкую к React, что
+упрощает перенос UI-паттернов старого приложения; роутер и desktop-поддержка
+есть из коробки.
+
+Риск (принят): экосистема богаче у React, часть UI-решений (waveform, drag-and-drop)
+придётся делать через web-sys/wasm-bindgen или небольшие JS-обёртки.
+
+### A · React + «толстое» Rust-ядро — отклонён
+
+Был рекомендован как более быстрый и предсказуемый путь (знакомый React-стек,
+богатая UI-экосистема). Пользователь предпочёл единый Rust-стек.
 
 ### B · React + «тонкий» Rust-слой — отклонён
 
-Rust только проксирует HTTP, оркестрация в TS. Быстрее стартовать, но теряется
-смысл переезда на Tauri: долгие запросы и восстановление сложнее делать в JS,
-надёжность ниже.
-
-### C · Полностью Rust (Leptos/Dioxus) — отклонён
-
-Без JS вообще. Экосистема для богатых UI сырая, разработка заметно медленнее,
-мало знаний в сообществе. Риск неоправдан для медиа-студии с плеерами и drag-and-drop.
+Rust только проксирует HTTP, оркестрация в TS. Теряется смысл переезда на Tauri:
+долгие запросы и восстановление сложнее делать в JS, надёжность ниже.
 
 ## Архитектура (как строим)
 
@@ -106,7 +111,7 @@ Rust только проксирует HTTP, оркестрация в TS. Бы�
 
 ```
 koteyye-media-studio/
-├── src-tauri/            # Rust-ядро
+├── src-tauri/            # Rust-ядро Tauri (backend-команды)
 │   ├── src/
 │   │   ├── main.rs
 │   │   ├── api/          # CI-клиент: images, videos, audio, models, generations
@@ -116,13 +121,20 @@ koteyye-media-studio/
 │   │   ├── files.rs      # сохранение медиа, папка пользователя, имена файлов
 │   │   └── events.rs     # события в frontend
 │   └── tauri.conf.json
-├── src/                  # React frontend
-│   ├── screens/          # Studio (image/video/audio), History, Settings, Onboarding
-│   ├── components/       # chips, model-dropdown, players, upload, recent-strip
-│   ├── store/            # Zustand
-│   └── i18n/             # ru/en
+├── ui/                   # Dioxus-приложение (Rust → WASM), общий крейт с ядром
+│   ├── src/
+│   │   ├── main.rs
+│   │   ├── screens/      # Studio (image/video/audio), History, Settings, Onboarding
+│   │   ├── components/   # chips, model-dropdown, players, upload, recent-strip
+│   │   ├── state.rs      # сигналы/контекст Dioxus
+│   │   └── i18n.rs       # ru/en
+│   └── assets/           # CSS-токены тем, иконки
+├── Cargo.toml            # workspace: src-tauri + ui (+ общий крейт типов)
 └── docs/
 ```
+
+Типы запросов/ответов CI и модели истории — в общем крейте, который используют
+и ядро, и UI; UI вызывает команды Tauri через `tauri-sys`/wasm-bindgen glue.
 
 ### Rust-ядро
 
@@ -138,14 +150,17 @@ koteyye-media-studio/
 - **Настройки**: папка, язык, тема, ключ. Ключ — в системный keychain (`keyring`),
   fallback — зашифрованное локальное хранилище.
 
-### Frontend
+### Frontend (Dioxus, Rust → WASM)
 
-- React + TS + Vite, Zustand для состояния.
-- Экраны и навигация — по утверждённым мокапам (см. ниже).
-- Плееры: видео — нативный `<video>`; аудио — кастомный плеер с волной
-  (waveform из декодированных данных, напр. `wavesurfer.js` или canvas + Web Audio).
-- Drag-and-drop изображений в промпт-зону (видео i2v/r2v, изображения-референсы).
+- Dioxus (CSR внутри webview Tauri), состояние — сигналы и контекст.
+- Экраны и навигация — по утверждённым мокапам (см. ниже); роутер Dioxus.
+- Плееры: видео — нативный `<video>` через web-sys; аудио — кастомный плеер
+  с волной (canvas + Web Audio через wasm-bindgen; допустима тонкая JS-обёртка
+  типа wavesurfer, если своя реализация неоправданно дорога).
+- Drag-and-drop изображений в промпт-зону (видео i2v/r2v, изображения-референсы) —
+  нативные DOM-события через web-sys.
 - Оценка цены до генерации: из `media_prices` каталога (разрешение × звук × длительность).
+- Стили — обычный CSS с переменными тем (те же токены, что в мокапах).
 
 ### Поток данных
 
@@ -178,7 +193,8 @@ UI → `invoke("generate_image", …)` → Rust → CI → файл на дис�
 
 ## Что остаётся на усмотрение строителя
 
-- Конкретные крейты и их версии (reqwest/tokio, rusqlite, keyring и т.п.).
+- Конкретные крейты и их версии (reqwest/tokio, rusqlite, keyring, dioxus,
+  tauri-sys и т.п.), схема сборки WASM-фронтенда в дистрибутив Tauri (dx/trunk).
 - Реализация waveform, точные имена Tauri-команд и схем событий.
 - Точные схемы ответов CI (проверить живыми запросами с ключом пользователя).
 - Обработка ошибок, ретраи, тесты, CI-сборка под macOS/Windows.
