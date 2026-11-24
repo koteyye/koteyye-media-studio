@@ -11,17 +11,23 @@ use crate::error::CoreError;
 /// Базовый URL API Cheaper Inference.
 const DEFAULT_BASE: &str = "https://api.cheaperinference.com";
 
-/// Таймаут запроса по умолчанию; видео-генерация переопределит его в Task 8.
+/// Таймаут запроса по умолчанию.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Таймаут синхронной видео-генерации: CI блокирует ответ до готовности
+/// видео и может считать до 10 минут.
+const VIDEO_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Асинхронный HTTP-клиент Cheaper Inference.
 ///
 /// Оборачивает [`reqwest::Client`] с таймаутом 60 секунд и подставляет
-/// заголовок `Authorization: Bearer <ключ>` в каждый запрос.
-/// Дёшево клонируется: внутренний клиент reqwest разделяется через `Arc`.
+/// заголовок `Authorization: Bearer <ключ>` в каждый запрос. Видео-запросы
+/// идут через отдельный клиент с таймаутом 600 секунд.
+/// Дёшево клонируется: внутренние клиенты reqwest разделяются через `Arc`.
 #[derive(Clone)]
 pub struct CiClient {
     http: reqwest::Client,
+    video_http: reqwest::Client,
     base: String,
     key: String,
 }
@@ -47,15 +53,28 @@ impl CiClient {
     /// Паникует, если не удалось инициализировать TLS-бэкенд rustls;
     /// при корректной сборке это невозможно.
     pub fn with_base(key: &str, base: &str) -> CiClient {
-        let http = reqwest::Client::builder()
-            .timeout(DEFAULT_TIMEOUT)
-            .build()
-            .expect("reqwest с rustls должен инициализироваться");
         CiClient {
-            http,
+            http: build_http(DEFAULT_TIMEOUT),
+            video_http: build_http(VIDEO_TIMEOUT),
             base: base.trim_end_matches('/').to_owned(),
             key: key.to_owned(),
         }
+    }
+
+    /// Задаёт таймаут всех запросов клиента, включая видео-генерацию.
+    ///
+    /// По умолчанию обычные запросы ограничены 60 секундами, видео —
+    /// 600; явное значение переопределяет оба. Нужен тестам, чтобы
+    /// проверить живой таймаут на короткой задержке.
+    ///
+    /// # Panics
+    ///
+    /// Паникует, если не удалось инициализировать TLS-бэкенд rustls;
+    /// при корректной сборке это невозможно.
+    pub fn with_timeout(mut self, timeout: Duration) -> CiClient {
+        self.http = build_http(timeout);
+        self.video_http = build_http(timeout);
+        self
     }
 
     /// GET-запрос к `path` (например `/v1/models`) с разбором JSON-ответа в `T`.
@@ -109,6 +128,27 @@ impl CiClient {
     ) -> Result<T, CoreError> {
         let response = self
             .http
+            .post(self.url(path))
+            .bearer_auth(&self.key)
+            .json(body)
+            .send()
+            .await
+            .map_err(map_transport_error)?;
+        decode(response, path).await
+    }
+
+    /// POST-запрос к `path` через видео-клиент с таймаутом 600 секунд.
+    ///
+    /// Отличается от [`CiClient::post_json`] только клиентом и таймаутом:
+    /// синхронная генерация видео блокирует ответ на минуты. Разбор ответа
+    /// и ошибки транспорта — те же.
+    pub(crate) async fn post_video_json<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, CoreError> {
+        let response = self
+            .video_http
             .post(self.url(path))
             .bearer_auth(&self.key)
             .json(body)
@@ -179,6 +219,19 @@ impl CiClient {
     fn url(&self, path: &str) -> String {
         format!("{}/{}", self.base, path.trim_start_matches('/'))
     }
+}
+
+/// Собирает reqwest-клиент с заданным таймаутом запроса.
+///
+/// # Panics
+///
+/// Паникует, если не удалось инициализировать TLS-бэкенд rustls;
+/// при корректной сборке это невозможно.
+fn build_http(timeout: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .expect("reqwest с rustls должен инициализироваться")
 }
 
 /// Debug без утечки API-ключа.

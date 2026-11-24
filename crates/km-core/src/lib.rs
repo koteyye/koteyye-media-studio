@@ -6,13 +6,16 @@
 //! генерации ([`for_mode`]). Изображения генерируются и редактируются
 //! ([`CiClient::generate_image`], [`CiClient::edit_image`]), байты результата
 //! даёт [`image_bytes`]. Аудио (озвучка, музыка, эффекты) генерируется
-//! через [`CiClient::speech`]. Видео появится в последующих задачах.
+//! через [`CiClient::speech`]. Видео генерируется синхронно
+//! ([`CiClient::generate_video`]), восстановление завершённых генераций —
+//! [`CiClient::generation`].
 
 mod audio;
 mod catalog;
 mod client;
 mod error;
 mod images;
+mod video;
 
 pub use catalog::{CatalogCache, by_kind, for_mode};
 pub use client::CiClient;
