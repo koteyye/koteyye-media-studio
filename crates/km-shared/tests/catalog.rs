@@ -47,6 +47,14 @@ fn veo_is_video_with_image_input_and_media_price() {
     assert!(!veo.supports("/v1/audio/speech"));
     assert_eq!(veo.price_for("720P+AUDIO"), Some(0.26));
     assert_eq!(veo.price_for("8K"), None, "несуществующий ключ цены");
+    assert_eq!(veo.provider_name.as_deref(), Some("Google"));
+    assert_eq!(veo.media_unit.as_deref(), Some("second"));
+    assert_eq!(veo.discount_percent.as_deref(), Some("35.00"));
+    assert!(
+        veo.aliases
+            .iter()
+            .any(|a| a == "google/veo-3.1-generate-001")
+    );
 }
 
 #[test]
@@ -92,28 +100,48 @@ fn unknown_model_type_falls_back_and_optional_fields_default() {
 
 #[test]
 fn model_type_serializes_back_to_catalog_strings() {
-    // Round-trip: сериализация возвращает те же строки, что присылает каталог.
-    for raw in [
-        "image",
-        "video",
-        "speech",
-        "text",
-        "embedding",
-        "transcription",
-        "rerank",
-        "decision",
-        "realtime",
-        "hologram",
-    ] {
+    // Известные типы обязаны попадать в свои варианты, а не в Unknown.
+    let cases = [
+        ("image", ModelType::Image),
+        ("video", ModelType::Video),
+        ("speech", ModelType::Speech),
+        ("text", ModelType::Text),
+        ("embedding", ModelType::Embedding),
+        ("transcription", ModelType::Transcription),
+        ("rerank", ModelType::Rerank),
+        ("decision", ModelType::Decision),
+        ("realtime", ModelType::Realtime),
+    ];
+    for (raw, expected) in cases {
         let json = format!(r#"{{"id":"m","model_type":"{raw}"}}"#);
         let model: CatalogModel =
             serde_json::from_str(&json).expect("тип должен десериализоваться");
+        assert!(
+            !matches!(model.model_type, ModelType::Unknown(_)),
+            "известный тип {raw} не должен попадать в Unknown"
+        );
+        assert_eq!(model.model_type, expected, "вариант для {raw}");
+
+        // Round-trip: сериализация возвращает те же строки, что присылает каталог.
         let value = serde_json::to_value(&model).expect("тип должен сериализоваться");
         assert_eq!(value["model_type"], raw, "round-trip для {raw}");
         let back: CatalogModel =
             serde_json::from_value(value).expect("обратная десериализация должна работать");
         assert_eq!(back, model, "round-trip для {raw}");
     }
+
+    // Заведомо неизвестный тип — в Unknown с сохранением исходной строки.
+    let json = r#"{"id":"m","model_type":"hologram"}"#;
+    let model: CatalogModel =
+        serde_json::from_str(json).expect("неизвестный тип должен десериализоваться");
+    assert!(matches!(model.model_type, ModelType::Unknown(_)));
+    assert_eq!(
+        model.model_type,
+        ModelType::Unknown("hologram".to_owned()),
+        "исходная строка каталога должна сохраниться"
+    );
+    let value = serde_json::to_value(&model).expect("тип должен сериализоваться");
+    assert_eq!(value["model_type"], "hologram", "round-trip для hologram");
 }
 
 #[test]

@@ -9,7 +9,8 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Цены медиа-генерации: ключ вида `720P+AUDIO` → цена строкой (микродоллары/центы).
+/// Цены медиа-генерации: ключ вида `720P+AUDIO` → цена в USD за единицу
+/// (секунда/символ/изображение — по `media_unit`), строкой с 6 знаками после запятой.
 pub type MediaPrices = BTreeMap<String, String>;
 
 /// Тип модели в каталоге CI; неизвестные типы сохраняются в [`ModelType::Unknown`].
@@ -108,7 +109,8 @@ pub struct CatalogModel {
     /// Единица тарификации медиа: `second`, `image` и т.п.
     #[serde(default)]
     pub media_unit: Option<String>,
-    /// Цены по ключам вида `720P+AUDIO`; значения — строки.
+    /// Цены в USD за единицу (`media_unit`) по ключам вида `720P+AUDIO`;
+    /// значения — строки с 6 знаками после запятой.
     #[serde(default)]
     pub media_prices: MediaPrices,
     /// Скидка в процентах строкой, например `35.00`.
@@ -133,7 +135,7 @@ impl CatalogModel {
         self.features.iter().any(|f| f == feature)
     }
 
-    /// Цена медиа-генерации по ключу (`720P+AUDIO` и т.п.).
+    /// Цена медиа-генерации в USD по ключу (`720P+AUDIO` и т.п.).
     ///
     /// Возвращает `None`, если ключа нет или значение не парсится в число.
     pub fn price_for(&self, key: &str) -> Option<f64> {
