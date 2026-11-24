@@ -13,10 +13,15 @@ base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 # reqwest 0.13: TLS по умолчанию — rustls (без системного OpenSSL),
 # system-proxy в дефолтных фичах читает системные прокси macOS.
 reqwest = { version = "0.13.5", features = ["json"] }
+# rusqlite bundled: встроенный SQLite (не системный) — одинаково на macOS/Windows.
+# functions: своя SQL-функция lower для регистронезависимого поиска по кириллице
+# (встроенный LOWER в SQLite сворачивает только ASCII).
+rusqlite = { version = "0.43.0", features = ["bundled", "functions"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"
 
 [dev-dependencies]
+tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6.5"

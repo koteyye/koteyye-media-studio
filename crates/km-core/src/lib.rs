@@ -8,16 +8,19 @@
 //! даёт [`image_bytes`]. Аудио (озвучка, музыка, эффекты) генерируется
 //! через [`CiClient::speech`]. Видео генерируется синхронно
 //! ([`CiClient::generate_video`]), восстановление завершённых генераций —
-//! [`CiClient::generation`].
+//! [`CiClient::generation`]. История, расход и настройки хранятся в SQLite
+//! ([`Storage`]).
 
 mod audio;
 mod catalog;
 mod client;
 mod error;
 mod images;
+mod storage;
 mod video;
 
 pub use catalog::{CatalogCache, by_kind, for_mode};
 pub use client::CiClient;
 pub use error::CoreError;
 pub use images::image_bytes;
+pub use storage::Storage;
