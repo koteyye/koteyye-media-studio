@@ -3,6 +3,7 @@
 members = [
     "crates/km-shared",
     "crates/km-core",
+    "crates/km-ui-core",
     "src-tauri",
     "ui",
 ]

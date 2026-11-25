@@ -18,11 +18,17 @@ const USER: &str = "ci-api-key";
 
 /// Хранилище API-ключа: чтение, запись и удаление.
 ///
-/// Ошибки — строки для UI (команды отдают `Result<T, String>`); отсутствие
-/// ключа — не ошибка, а `None`/успешное удаление.
+/// Ошибки — строки для UI (команды отдают `Result<T, String>`). Отсутствие
+/// ключа — не ошибка, а `Ok(None)`; сбой доступа к хранилищу (заблокированный
+/// keychain, отказ prompt) — `Err`: «ключа нет» и «ключ не прочитать» —
+/// разные причины, и путать их нельзя (ложный онбординг существующего юзера).
 pub trait KeyStore: Send + Sync {
-    /// Текущий ключ; `None`, если ключ не задан или хранилище недоступно.
-    fn get(&self) -> Option<String>;
+    /// Текущий ключ: `Ok(None)` — ключ не задан, `Err` — хранилище не читается.
+    ///
+    /// # Errors
+    ///
+    /// Строка с причиной, если доступ к хранилищу не удался.
+    fn get(&self) -> Result<Option<String>, String>;
 
     /// Сохраняет ключ, перезаписывая предыдущий.
     ///
@@ -42,8 +48,10 @@ pub trait KeyStore: Send + Sync {
 /// Системный keychain через крейт `keyring`.
 ///
 /// Запись `ru.koteyye.media-studio` / `ci-api-key`. На macOS доступ к Keychain
-/// может потребовать подтверждения пользователя; ошибки чтения трактуются
-/// как отсутствие ключа (интерфейс [`KeyStore::get`] не различает причины).
+/// может потребовать подтверждения пользователя; ошибка чтения (заблокированный
+/// keychain, отказ prompt — типично для неподписанных dev-сборок) возвращается
+/// как `Err`, а не как отсутствие ключа: иначе существующий пользователь с
+/// валидным ключом попал бы в онбординг.
 #[derive(Debug)]
 pub struct KeychainStore {
     entry: Entry,
@@ -63,16 +71,13 @@ impl KeychainStore {
 }
 
 impl KeyStore for KeychainStore {
-    fn get(&self) -> Option<String> {
+    fn get(&self) -> Result<Option<String>, String> {
         match self.entry.get_password() {
-            Ok(key) => Some(key),
-            Err(keyring::Error::NoEntry) => None,
-            Err(e) => {
-                // Диагностика: «ключа нет» и «keychain недоступен» — разные
-                // причины; в stderr, чтобы их можно было различить при разборе.
-                eprintln!("keychain: не удалось прочитать ключ CI: {e}");
-                None
-            }
+            Ok(key) => Ok(Some(key)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            // «Ключа нет» и «keychain недоступен» — разные причины: ошибка
+            // чтения не должна выглядеть как отсутствие ключа (ложный онбординг).
+            Err(e) => Err(format!("не удалось прочитать ключ из keychain: {e}")),
         }
     }
 
@@ -107,8 +112,8 @@ impl InMemoryKeyStore {
 }
 
 impl KeyStore for InMemoryKeyStore {
-    fn get(&self) -> Option<String> {
-        self.lock().clone()
+    fn get(&self) -> Result<Option<String>, String> {
+        Ok(self.lock().clone())
     }
 
     fn set(&self, key: &str) -> Result<(), String> {
@@ -145,13 +150,13 @@ mod tests {
     #[test]
     fn in_memory_store_roundtrip() {
         let store = InMemoryKeyStore::default();
-        assert_eq!(store.get(), None, "изначально ключа нет");
+        assert_eq!(store.get().expect("get"), None, "изначально ключа нет");
         store.set("ci_live_x").expect("set");
-        assert_eq!(store.get().as_deref(), Some("ci_live_x"));
+        assert_eq!(store.get().expect("get").as_deref(), Some("ci_live_x"));
         store.set("ci_live_y").expect("перезапись");
-        assert_eq!(store.get().as_deref(), Some("ci_live_y"));
+        assert_eq!(store.get().expect("get").as_deref(), Some("ci_live_y"));
         store.delete().expect("delete");
-        assert_eq!(store.get(), None);
+        assert_eq!(store.get().expect("get"), None);
         store.delete().expect("повторное удаление не ошибка");
     }
 

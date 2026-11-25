@@ -1,16 +1,7 @@
-//! Заглушка UI Koteyye Media Studio: Dioxus-приложение, компилируемое в WASM.
-
-use dioxus::prelude::*;
+//! Точка входа UI Koteyye Media Studio: запуск Dioxus-приложения (WASM).
+//!
+//! Каркас приложения (роутер, состояние, темы, i18n) — в [`km_ui::app`].
 
 fn main() {
-    dioxus::launch(App);
-}
-
-/// Корневой компонент-заглушка: подтверждает, что каркас Tauri + Dioxus работает.
-#[component]
-fn App() -> Element {
-    rsx! {
-        h1 { "Koteyye Media Studio 2.0" }
-        p { "Каркас работает." }
-    }
+    dioxus::launch(km_ui::app::App);
 }

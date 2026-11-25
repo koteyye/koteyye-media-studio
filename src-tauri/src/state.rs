@@ -3,7 +3,9 @@
 //! [`AppState`] живёт в Tauri-состоянии (`Arc<AppState>` через `.manage`);
 //! все поля синхронизированы внутри себя ([`Storage`] — мьютекс соединения,
 //! [`CatalogCache`] — мьютекс состояния, [`KeyStore`] — по реализации),
-//! поэтому команды работают с `&AppState` без внешнего лока.
+//! поэтому команды работают с `&AppState` без внешнего лока. Исключение —
+//! восстановление: проходы сериализуются локом [`AppState::recovery_lock`],
+//! чтобы стартовый проход и проход из UI не обработали одни Pending дважды.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,6 +13,7 @@ use std::time::Duration;
 
 use km_core::{CatalogCache, CiClient, Jobs, Storage};
 use km_shared::AppEvent;
+use tauri::async_runtime::Mutex;
 
 use crate::keychain::KeyStore;
 
@@ -36,6 +39,8 @@ pub struct AppState {
     db_path: PathBuf,
     /// Эмиттер событий: в Tauri — события окна, в тестах — коллектор.
     emit: Arc<dyn Fn(AppEvent) + Send + Sync>,
+    /// Сериализует проходы восстановления (setup при старте и load из UI).
+    recovery_lock: Mutex<()>,
 }
 
 impl AppState {
@@ -58,6 +63,7 @@ impl AppState {
             base_url: base_url.to_owned(),
             db_path: db_path.to_owned(),
             emit,
+            recovery_lock: Mutex::new(()),
         })
     }
 
@@ -84,6 +90,16 @@ impl AppState {
     #[must_use]
     pub fn catalog(&self) -> &CatalogCache {
         &self.catalog
+    }
+
+    /// Лок проходов восстановления: захватывается на весь `cmd_recover_pending`.
+    ///
+    /// Стартовый проход (setup) и проход из UI (load) идут через одну команду;
+    /// лок не даёт им прочитать одни `Pending` параллельно и скачать файлы
+    /// дважды. Второй проход ждёт первый и видит только ещё-`Pending`.
+    #[must_use]
+    pub fn recovery_lock(&self) -> &Mutex<()> {
+        &self.recovery_lock
     }
 
     /// Шлёт событие ядра через эмиттер (Tauri-события или коллектор тестов).

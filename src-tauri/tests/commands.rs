@@ -27,6 +27,24 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 /// Эмиттер событий ядра (в тестах — запись в коллектор).
 type EventEmitter = Arc<dyn Fn(AppEvent) + Send + Sync>;
 
+/// KeyStore с нечитаемым хранилищем: `get` всегда `Err` (заблокированный
+/// keychain, отказ prompt). Запись и удаление успешны — сбой именно чтения.
+struct UnreadableKeyStore;
+
+impl KeyStore for UnreadableKeyStore {
+    fn get(&self) -> Result<Option<String>, String> {
+        Err("не удалось прочитать ключ из keychain: доступ запрещён".to_owned())
+    }
+
+    fn set(&self, _key: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn delete(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 /// Коллектор событий для проверки порядка и состава.
 type EventLog = Arc<Mutex<Vec<AppEvent>>>;
 
@@ -312,6 +330,86 @@ async fn test_connection_non_401_error_returns_err() {
 }
 
 #[tokio::test]
+async fn test_connection_keychain_read_error_is_err_not_false() {
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().expect("tempdir");
+    let (emit, _events) = collector();
+    let state = AppState::new(
+        &tmp.path().join("history.db"),
+        Box::new(UnreadableKeyStore),
+        &server.uri(),
+        emit,
+    )
+    .expect("AppState должен создаться");
+
+    // Ошибка чтения keychain — не вердикт о ключе: Err (UI покажет причину,
+    // редиректа в онбординг нет), а не Ok(false) с ложным онбордингом.
+    let err = cmd_test_connection(&state)
+        .await
+        .expect_err("сбой чтения keychain — ошибка, а не отсутствие ключа");
+    assert!(err.contains("keychain"), "ошибка называет причину: {err}");
+    assert!(
+        received(&server).await.is_empty(),
+        "без читаемого ключа запрос к CI не идёт"
+    );
+}
+
+#[tokio::test]
+async fn recover_pending_keychain_read_error_keeps_pending() {
+    let server = MockServer::start().await;
+    let guard = Mock::given(method("GET"))
+        .and(path("/v1/generations/req_crash"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount_as_scoped(&server)
+        .await;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let (emit, events) = collector();
+    let state = AppState::new(
+        &tmp.path().join("history.db"),
+        Box::new(UnreadableKeyStore),
+        &server.uri(),
+        emit,
+    )
+    .expect("AppState должен создаться");
+    let folder = tmp.path().join("media");
+    std::fs::create_dir_all(&folder).expect("папка");
+    state
+        .storage
+        .set_settings(&Settings {
+            local_folder: folder.to_string_lossy().into_owned(),
+            lang: Lang::Ru,
+            theme: Theme::System,
+            show_real_balance: false,
+        })
+        .expect("настройки");
+    let mut rec = history_record("crashed", JobStatus::Pending);
+    rec.request_id = Some("req_crash".to_owned());
+    state.storage.insert_history(&rec).expect("запись");
+
+    // Нечитаемый keychain не сжигает оплаченные Pending: Err, записи на месте.
+    let err = cmd_recover_pending(&state)
+        .await
+        .expect_err("сбой чтения keychain — ошибка восстановления");
+    assert!(err.contains("keychain"), "ошибка называет причину: {err}");
+    let history = state
+        .storage
+        .history(&HistoryFilter::default())
+        .expect("история");
+    assert_eq!(history.len(), 1, "запись на месте");
+    assert_eq!(
+        history[0].status,
+        JobStatus::Pending,
+        "запись остаётся Pending"
+    );
+    assert!(received(&server).await.is_empty(), "запрос к CI не идёт");
+    assert!(events.lock().expect("lock").is_empty(), "событий нет");
+
+    drop(guard);
+}
+
+#[tokio::test]
 async fn fetch_balance_403_falls_back_to_local() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -480,7 +578,7 @@ async fn set_api_key_stores_in_key_store_not_in_sqlite() {
         .await
         .expect("set_api_key");
     assert_eq!(
-        state.key_store.get().as_deref(),
+        state.key_store.get().expect("get").as_deref(),
         Some("ci_live_secret_key"),
         "ключ в KeyStore"
     );
@@ -496,7 +594,11 @@ async fn set_api_key_stores_in_key_store_not_in_sqlite() {
     cmd_set_api_key(&state, "   ")
         .await
         .expect("пустой set_api_key");
-    assert_eq!(state.key_store.get(), None, "пустой ключ удаляет запись");
+    assert_eq!(
+        state.key_store.get().expect("get"),
+        None,
+        "пустой ключ удаляет запись"
+    );
 }
 
 #[tokio::test]
@@ -596,6 +698,91 @@ async fn recover_pending_completes_crashed_record_and_emits_balance() {
     );
 
     drop(guard);
+}
+
+#[tokio::test]
+async fn parallel_recover_pending_processes_each_record_once() {
+    let server = MockServer::start().await;
+    let file_url = format!("{}/signed/dup.png", server.uri());
+    // Стартовый проход (setup) и проход из UI (load) зовут одну команду.
+    // Без сериализации оба читают одни Pending и скачивают файл дважды:
+    // дубликат по timestamp, двойные Done/BalanceUpdated, сирота после complete.
+    let generation_guard = Mock::given(method("GET"))
+        .and(path("/v1/generations/req_dup"))
+        .and(header("authorization", "Bearer ci_live_test"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "request_id": "req_dup",
+            "endpoint": "/v1/images/generations",
+            "created_at": "2026-11-24T10:00:00Z",
+            "expires_at": "2026-12-01T10:00:00Z",
+            "files": [{
+                "index": 0, "type": "image", "content_type": "image/png",
+                "size_bytes": 2, "url": file_url,
+            }],
+        })))
+        .expect(1)
+        .mount_as_scoped(&server)
+        .await;
+    let file_guard = Mock::given(method("GET"))
+        .and(path("/signed/dup.png"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"hi"))
+        .expect(1)
+        .mount_as_scoped(&server)
+        .await;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let (state, events) = state_for(&server, &tmp, Some("ci_live_test"));
+    let folder = with_folder(&state, &tmp);
+    let mut rec = history_record("dup", JobStatus::Pending);
+    rec.request_id = Some("req_dup".to_owned());
+    state.storage.insert_history(&rec).expect("запись");
+
+    // Два конкурентных прохода: как при живом ключе + Pending на старте.
+    let (first, second) = tokio::join!(cmd_recover_pending(&state), cmd_recover_pending(&state),);
+    let first = first.expect("первый проход recover");
+    let second = second.expect("второй проход recover");
+
+    let completed = first
+        .iter()
+        .chain(second.iter())
+        .filter(|r| r.status == JobStatus::Completed)
+        .count();
+    assert_eq!(completed, 1, "запись завершена ровно один раз");
+    assert!(
+        first.is_empty() || second.is_empty(),
+        "второй проход видит только ещё-Pending: проходы сериализованы"
+    );
+
+    // Один файл на запись: без дубликата по timestamp и без сироты.
+    let files: Vec<_> = std::fs::read_dir(&folder)
+        .expect("папка сохранения читается")
+        .collect();
+    assert_eq!(files.len(), 1, "один файл на запись, без дублей");
+
+    // События не дублируются: один Done и один BalanceUpdated.
+    let events = events.lock().expect("lock").clone();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(
+                e,
+                AppEvent::GenerationDone { history_id } if history_id == "dup"
+            ))
+            .count(),
+        1,
+        "один GenerationDone"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::BalanceUpdated))
+            .count(),
+        1,
+        "один BalanceUpdated"
+    );
+
+    drop(generation_guard);
+    drop(file_guard);
 }
 
 #[tokio::test]

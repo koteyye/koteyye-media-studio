@@ -5,9 +5,11 @@
 //! результат сохраняется в локальную папку (локальная копия первична), статус
 //! и стоимость обновляются в БД, а UI получает события [`AppEvent`]. Записи
 //! `Pending`, пережившие перезапуск, восстанавливаются через [`CiClient::generation`]:
-//! транзиентные ошибки (сеть, таймаут, ввод-вывод) оставляют запись `Pending`
-//! до следующего запуска, оплаченная генерация не теряется. Пустой результат
-//! или незавершённый статус видео при 200 — ошибка, а не тихий `Completed`.
+//! транзиентные ошибки (сеть, таймаут, ввод-вывод, БД, HTTP 5xx/429) оставляют
+//! запись `Pending` до следующего запуска, оплаченная генерация не теряется.
+//! Пустой результат или definitive-статус видео при 200 — ошибка, а не тихий
+//! `Completed`; ещё идущее видео (`processing`/`pending`/`in_progress`)
+//! остаётся `Pending` с сохранённым `request_id`.
 //! Баланс гибридный — реальный из CI при наличии scope, иначе локальный расход.
 
 use std::fmt;
@@ -83,22 +85,30 @@ impl Jobs {
     /// Порядок: вставка `Pending` (id — UUID, время в секундах), событие
     /// `GenerationStarted`, вызов клиента по виду медиа, сохранение каждого
     /// файла в локальную папку, обновление `Completed` со стоимостью, событие
-    /// `GenerationDone`. `request_id` фиксируется в БД сразу после ответа CI и
-    /// до скачивания файлов, поэтому краш на этапе скачивания восстановим.
-    /// При ошибке или таймауте запись переводится в `Failed`, шлётся
-    /// `GenerationFailed` и возвращается [`Err`] (запись `Failed` остаётся в истории).
-    /// Пустой результат CI (`data`/`videos`/`files`/аудио) или статус видео,
-    /// отличный от `completed`/`succeeded`, — ошибка [`CoreError::Serde`].
+    /// `GenerationDone`. `request_id` и стоимость фиксируются в БД сразу после
+    /// ответа CI и до скачивания файлов, поэтому краш на этапе скачивания
+    /// восстановим, а оплаченная цена не теряется.
+    ///
+    /// Транзиентная ошибка (`is_transient`) после фиксации `request_id`
+    /// оставляет запись `Pending`: оплаченная генерация жива на CI,
+    /// [`Jobs::recover_pending`] повторит скачивание. Для UI возвращается
+    /// [`Err`], событие `GenerationFailed` не шлётся. Если `request_id` ещё
+    /// не получен (сбой до ответа CI), запись переводится в `Failed`.
+    /// Definitive-ошибки (прочие 4xx, пустой результат) также переводят
+    /// в `Failed` с событием `GenerationFailed`. Видео в статусах
+    /// `processing`/`pending`/`in_progress` остаётся `Pending` с сохранённым
+    /// `request_id` — генерация ещё идёт на CI.
     ///
     /// # Errors
     ///
     /// [`CoreError`] от клиента (валидация, HTTP, таймаут, сеть), хранилища или
-    /// файловой системы; запись истории при этом уже переведена в `Failed`.
+    /// файловой системы; запись истории при этом либо `Failed` (definitive),
+    /// либо остаётся `Pending` (транзиентный сбой после фиксации `request_id`).
     pub async fn run(&self, req: GenerationRequest) -> Result<HistoryRecord> {
         let now = now_unix_secs()?;
         let params_json =
             serde_json::to_string(&req).map_err(|e| CoreError::Serde(e.to_string()))?;
-        let rec = HistoryRecord {
+        let mut rec = HistoryRecord {
             id: Uuid::new_v4().to_string(),
             created_at: now,
             updated_at: now,
@@ -118,9 +128,22 @@ impl Jobs {
             history_id: rec.id.clone(),
         });
 
-        match self.produce_and_save(&rec, &req).await {
-            Ok(record) => Ok(record),
+        match self.produce_and_save(&mut rec, &req).await {
+            Ok(Produced::Completed(record)) => Ok(record),
+            Ok(Produced::InProgress { status }) => {
+                // request_id уже в БД: запись остаётся Pending, recovery
+                // подхватит её при следующем запуске. Для UI — ошибка.
+                Err(CoreError::Serde(format!(
+                    "CI вернул незавершённый статус видео: {status} (генерация ещё идёт)"
+                )))
+            }
             Err(err) => {
+                // Транзиентный сбой после фиксации request_id не сжигает
+                // запись: оплаченная генерация жива на CI, повторит recovery.
+                if is_transient(&err) && rec.request_id.is_some() {
+                    eprintln!("генерация {} отложена: {err}", rec.id);
+                    return Err(err);
+                }
                 self.fail(&rec, err.to_string())?;
                 Err(err)
             }
@@ -132,9 +155,11 @@ impl Jobs {
     /// Для каждой записи: с корректным `request_id` — запрос
     /// [`CiClient::generation`], скачивание и сохранение файлов, `Completed`;
     /// без `request_id` (ответ CI не был получен) — `Failed`. Транзиентные
-    /// ошибки (сеть, таймаут, ввод-вывод) оставляют запись `Pending`: файлы
-    /// живут на CI 7 дней, генерация восстановится при следующем запуске.
-    /// Definitive-ответы CI (404/410, пустой результат) переводят в `Failed`.
+    /// ошибки (сеть, таймаут, ввод-вывод, БД, HTTP 5xx/429) оставляют запись
+    /// `Pending`: файлы живут на CI 7 дней, генерация восстановится при
+    /// следующем запуске. Definitive-ответы CI (404/410, пустой результат)
+    /// переводят в `Failed`; если сам `Failed` не записался из-за сбоя БД,
+    /// запись тоже остаётся `Pending`.
     /// Сбой хранилища на одной записи логируется и не прерывает остальные.
     /// Возвращает обработанные записи с итоговым статусом (оставшиеся
     /// `Pending` — как есть). События `GenerationDone`/`GenerationFailed`
@@ -184,23 +209,39 @@ impl Jobs {
         })
     }
 
-    /// Генерирует медиа и сохраняет файлы, возвращая запись `Completed`.
+    /// Генерирует медиа и сохраняет файлы: запись `Completed` или ещё идущее видео.
     async fn produce_and_save(
         &self,
-        rec: &HistoryRecord,
+        rec: &mut HistoryRecord,
         req: &GenerationRequest,
-    ) -> Result<HistoryRecord> {
-        let generated = self.generate(&rec.id, req).await?;
-        let local_paths = self.save_files(req.kind, &generated.files)?;
-        self.complete(rec, generated.request_id, local_paths, generated.cost_usd)
+    ) -> Result<Produced> {
+        match self.generate(rec, req).await? {
+            Generated::Ready {
+                request_id,
+                cost_usd,
+                files,
+            } => {
+                let local_paths = self.save_files(req.kind, &files)?;
+                let record = self.complete(rec, request_id, local_paths, cost_usd)?;
+                Ok(Produced::Completed(record))
+            }
+            Generated::InProgress { status } => Ok(Produced::InProgress { status }),
+        }
     }
 
     /// Вызывает клиент по виду медиа и собирает байты файлов со стоимостью.
     ///
-    /// `request_id` изображений и видео сохраняется в БД до скачивания файлов:
-    /// краш после ответа CI, но до сохранения оставляет запись `Pending` с id,
-    /// которую подхватит [`Jobs::recover_pending`].
-    async fn generate(&self, id: &str, req: &GenerationRequest) -> Result<Generated> {
+    /// `request_id` и стоимость изображений и видео сохраняются в БД до
+    /// скачивания файлов и до проверки статуса видео: краш после ответа CI,
+    /// но до сохранения оставляет запись `Pending` с id и оплаченной ценой,
+    /// которую подхватит [`Jobs::recover_pending`]. После успешной фиксации
+    /// поля обновляются и в `rec` — по `request_id` [`Jobs::run`] отличает
+    /// восстановимый сбой от Failed.
+    async fn generate(
+        &self,
+        rec: &mut HistoryRecord,
+        req: &GenerationRequest,
+    ) -> Result<Generated> {
         match req.kind {
             MediaKind::Image => {
                 let response = match req.mode {
@@ -212,7 +253,10 @@ impl Jobs {
                         "CI вернул пустой результат: data".to_owned(),
                     ));
                 }
-                self.set_request_id(id, response.request_id.as_deref())?;
+                let cost_usd = response.billing.as_ref().and_then(|b| b.cost_usd());
+                self.set_request_id_and_cost(&rec.id, response.request_id.as_deref(), cost_usd)?;
+                rec.request_id = response.request_id.clone();
+                rec.cost_usd = cost_usd;
                 let mut files = Vec::with_capacity(response.data.len());
                 for item in &response.data {
                     let bytes = image_bytes(item, &self.client).await?;
@@ -225,9 +269,9 @@ impl Jobs {
                         content_type,
                     });
                 }
-                Ok(Generated {
+                Ok(Generated::Ready {
                     request_id: response.request_id,
-                    cost_usd: response.billing.as_ref().and_then(|b| b.cost_usd()),
+                    cost_usd,
                     files,
                 })
             }
@@ -238,7 +282,7 @@ impl Jobs {
                         "CI вернул пустой результат: аудио".to_owned(),
                     ));
                 }
-                Ok(Generated {
+                Ok(Generated::Ready {
                     request_id: None,
                     cost_usd: output.cost_usd,
                     files: vec![MediaBytes {
@@ -249,40 +293,52 @@ impl Jobs {
             }
             MediaKind::Video => {
                 let response = self.client.generate_video(req).await?;
-                // CI документирует completed/succeeded как успешные статусы;
-                // всё остальное (failed, processing, …) — ошибка, не Completed.
-                if !matches!(response.status.as_str(), "completed" | "succeeded") {
-                    return Err(CoreError::Serde(format!(
-                        "CI вернул незавершённый статус видео: {}",
-                        response.status
-                    )));
+                let cost_usd = response.billing.as_ref().and_then(|b| b.cost_usd());
+                // request_id и стоимость фиксируются до status-guard: даже
+                // незавершённая генерация восстановима, оплаченные id и цена
+                // не должны потеряться.
+                self.set_request_id_and_cost(&rec.id, response.request_id.as_deref(), cost_usd)?;
+                rec.request_id = response.request_id.clone();
+                rec.cost_usd = cost_usd;
+                match response.status.as_str() {
+                    // CI документирует completed/succeeded как успешные статусы.
+                    "completed" | "succeeded" => {
+                        if response.videos.is_empty() {
+                            return Err(CoreError::Serde(
+                                "CI вернул пустой результат: videos".to_owned(),
+                            ));
+                        }
+                        let mut files = Vec::with_capacity(response.videos.len());
+                        for item in &response.videos {
+                            let Some(url) = &item.url else {
+                                return Err(CoreError::Serde("элемент видео без url".to_owned()));
+                            };
+                            let bytes = self.video_download.download(url).await?;
+                            let content_type = item
+                                .content_type
+                                .clone()
+                                .unwrap_or_else(|| DEFAULT_VIDEO_CONTENT_TYPE.to_owned());
+                            files.push(MediaBytes {
+                                bytes,
+                                content_type,
+                            });
+                        }
+                        Ok(Generated::Ready {
+                            request_id: response.request_id,
+                            cost_usd,
+                            files,
+                        })
+                    }
+                    // Генерация ещё идёт: запись остаётся Pending с request_id,
+                    // recovery заберёт файлы, когда CI завершит задание.
+                    "processing" | "pending" | "in_progress" => Ok(Generated::InProgress {
+                        status: response.status.clone(),
+                    }),
+                    // Definitive-статусы (failed, cancelled, …) — ошибка.
+                    other => Err(CoreError::Serde(format!(
+                        "CI вернул незавершённый статус видео: {other}"
+                    ))),
                 }
-                if response.videos.is_empty() {
-                    return Err(CoreError::Serde(
-                        "CI вернул пустой результат: videos".to_owned(),
-                    ));
-                }
-                self.set_request_id(id, response.request_id.as_deref())?;
-                let mut files = Vec::with_capacity(response.videos.len());
-                for item in &response.videos {
-                    let Some(url) = &item.url else {
-                        return Err(CoreError::Serde("элемент видео без url".to_owned()));
-                    };
-                    let bytes = self.video_download.download(url).await?;
-                    let content_type = item
-                        .content_type
-                        .clone()
-                        .unwrap_or_else(|| DEFAULT_VIDEO_CONTENT_TYPE.to_owned());
-                    files.push(MediaBytes {
-                        bytes,
-                        content_type,
-                    });
-                }
-                Ok(Generated {
-                    request_id: response.request_id,
-                    cost_usd: response.billing.as_ref().and_then(|b| b.cost_usd()),
-                    files,
-                })
             }
         }
     }
@@ -312,7 +368,7 @@ impl Jobs {
             .as_deref()
             .filter(|id| is_safe_request_id(id))
         else {
-            return self.fail(
+            return self.fail_or_keep_pending(
                 rec,
                 "восстановление невозможно: нет корректного request_id (ответ CI не был получен)"
                     .to_owned(),
@@ -324,7 +380,22 @@ impl Jobs {
                 eprintln!("восстановление записи {} отложено: {err}", rec.id);
                 Ok(rec.clone())
             }
-            Err(err) => self.fail(rec, err.to_string()),
+            Err(err) => self.fail_or_keep_pending(rec, err.to_string()),
+        }
+    }
+
+    /// Переводит запись в `Failed`; транзиентный сбой самой записи оставляет `Pending`.
+    ///
+    /// Если БД не приняла `Failed` (например, write-лок), оплаченная генерация
+    /// не сжигается: запись остаётся `Pending` до следующего запуска.
+    fn fail_or_keep_pending(&self, rec: &HistoryRecord, error: String) -> Result<HistoryRecord> {
+        match self.fail(rec, error) {
+            Ok(record) => Ok(record),
+            Err(err) if is_transient(&err) => {
+                eprintln!("запись {} остаётся Pending: {err}", rec.id);
+                Ok(rec.clone())
+            }
+            Err(err) => Err(err),
         }
     }
 
@@ -344,8 +415,9 @@ impl Jobs {
             let path = save_media(&self.folder, rec.kind, index, total, &bytes, &content_type)?;
             local_paths.push(path.to_string_lossy().into_owned());
         }
-        // request_id и стоимость не меняем: id уже в записи, а recovery-эндпоинт
-        // не отдаёт billing — стоимость восстановленной записи остаётся прежней.
+        // request_id и стоимость не меняем: оба зафиксированы в БД сразу после
+        // ответа CI (recovery-эндпоинт billing не отдаёт) — восстановление
+        // завершает запись с оплаченной ценой, не теряя её.
         self.complete(rec, rec.request_id.clone(), local_paths, rec.cost_usd)
     }
 
@@ -357,11 +429,23 @@ impl Jobs {
         }
     }
 
-    /// Фиксирует `request_id` в БД сразу после ответа CI (статус остаётся `Pending`).
-    fn set_request_id(&self, id: &str, request_id: Option<&str>) -> Result<()> {
-        if let Some(request_id) = request_id {
+    /// Фиксирует `request_id` и стоимость в БД сразу после ответа CI
+    /// (статус остаётся `Pending`).
+    ///
+    /// Оба поля персистятся одним патчем до скачивания файлов: транзиентный
+    /// сбой оставляет запись `Pending` с оплаченной ценой —
+    /// [`Jobs::recover_pending`] завершит её без потери стоимости
+    /// (recovery-эндпоинт billing не отдаёт).
+    fn set_request_id_and_cost(
+        &self,
+        id: &str,
+        request_id: Option<&str>,
+        cost_usd: Option<f64>,
+    ) -> Result<()> {
+        if request_id.is_some() || cost_usd.is_some() {
             let patch = HistoryPatch {
-                request_id: Some(request_id.to_owned()),
+                request_id: request_id.map(str::to_owned),
+                cost_usd,
                 ..HistoryPatch::default()
             };
             self.storage.update_history(id, &patch)?;
@@ -439,11 +523,24 @@ impl fmt::Debug for Jobs {
     }
 }
 
-/// Результат генерации: идентификатор запроса CI, стоимость и байты файлов.
-struct Generated {
-    request_id: Option<String>,
-    cost_usd: Option<f64>,
-    files: Vec<MediaBytes>,
+/// Исход генерации медиа: готовые файлы или ещё идущая генерация видео.
+enum Generated {
+    /// Файлы получены: идентификатор запроса CI, стоимость и байты файлов.
+    Ready {
+        request_id: Option<String>,
+        cost_usd: Option<f64>,
+        files: Vec<MediaBytes>,
+    },
+    /// Видео ещё генерируется на CI (статус ответа); `request_id` уже в БД.
+    InProgress { status: String },
+}
+
+/// Исход [`Jobs::produce_and_save`]: запись завершена или генерация ещё идёт.
+enum Produced {
+    /// Файлы сохранены, запись переведена в `Completed`.
+    Completed(HistoryRecord),
+    /// Видео ещё генерируется (статус CI); запись остаётся `Pending`.
+    InProgress { status: String },
 }
 
 /// Байты одного медиа-файла и его MIME-тип до нормализации.
@@ -465,18 +562,26 @@ fn normalize_content_type(content_type: &str) -> String {
         .to_lowercase()
 }
 
-/// Транзиентная ли ошибка: сеть, таймаут или локальный ввод-вывод.
+/// Транзиентная ли ошибка: сеть, таймаут, ввод-вывод, БД или HTTP 5xx/429.
 ///
-/// При таких ошибках recovery оставляет запись `Pending` — оплаченная
-/// генерация жива на CI (файлы 7 дней), повтор при следующем запуске имеет
-/// смысл. Definitive-ответы CI ([`CoreError::Http`], [`CoreError::Serde`]),
-/// ошибки БД и валидации транзиентными не считаются: запись переводится
-/// в `Failed` (контракт «ошибка CI → Failed» для definitive-ответов).
+/// При таких ошибках запись остаётся `Pending` — оплаченная генерация жива
+/// на CI (файлы 7 дней), повтор при следующем запуске имеет смысл. Сбой БД
+/// транзиентен: `Failed` может не записаться, а терять Paid-Pending нельзя.
+/// Definitive-ответы CI (прочие 4xx, [`CoreError::Serde`]), ошибки валидации
+/// и ключа транзиентными не считаются: запись переводится в `Failed`.
+///
+/// Матч исчерпывающий по всем вариантам [`CoreError`] намеренно: денежная
+/// классификация — новый вариант ошибки не должен молча стать definitive
+/// (или транзиентным), добавление варианта обязывает классифицировать его явно.
 fn is_transient(err: &CoreError) -> bool {
-    matches!(
-        err,
-        CoreError::Network(_) | CoreError::Timeout | CoreError::Io(_)
-    )
+    match err {
+        CoreError::Network(_) | CoreError::Timeout | CoreError::Io(_) | CoreError::Db(_) => true,
+        CoreError::Http { status, .. } => matches!(status, 500..=599 | 429),
+        CoreError::ScopeMissing
+        | CoreError::NoKey
+        | CoreError::Serde(_)
+        | CoreError::Validation(_) => false,
+    }
 }
 
 /// Допустим ли `request_id` для подстановки в URL recovery-эндпоинта.
@@ -521,26 +626,41 @@ mod tests {
     }
 
     #[test]
-    fn transient_errors_are_network_timeout_io_only() {
+    fn transient_classification_covers_every_core_error_variant() {
+        // Исчерпывающая классификация: каждый вариант CoreError проверен явно,
+        // новый вариант не сможет молча попасть в definitive через wildcard.
         assert!(is_transient(&CoreError::Network("обрыв".to_owned())));
         assert!(is_transient(&CoreError::Timeout));
         assert!(is_transient(&CoreError::Io(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "нет прав",
         ))));
-        // Definitive-ответы CI и ошибки БД/валидации — не транзиентные.
-        assert!(!is_transient(&CoreError::Http {
-            status: 404,
-            code: None,
-            message: "not found".to_owned(),
-        }));
-        assert!(!is_transient(&CoreError::Http {
-            status: 500,
-            code: None,
-            message: "boom".to_owned(),
-        }));
+        // Сбой БД транзиентен: запись Failed может не записаться, а Paid-Pending
+        // терять нельзя — оставляем Pending до следующего запуска.
+        assert!(is_transient(&CoreError::Db("locked".to_owned())));
+        // HTTP 5xx и 429 — транзиентные ответы CI: повтор имеет смысл.
+        for status in [500, 503, 599, 429] {
+            assert!(
+                is_transient(&CoreError::Http {
+                    status,
+                    code: None,
+                    message: "boom".to_owned(),
+                }),
+                "статус {status} должен быть транзиентным"
+            );
+        }
+        // Прочие 4xx — definitive-ответы CI: запись переводится в Failed.
+        for status in [400, 401, 403, 404, 410, 499] {
+            assert!(
+                !is_transient(&CoreError::Http {
+                    status,
+                    code: None,
+                    message: "definitive".to_owned(),
+                }),
+                "статус {status} не должен быть транзиентным"
+            );
+        }
         assert!(!is_transient(&CoreError::Serde("пустой ответ".to_owned())));
-        assert!(!is_transient(&CoreError::Db("locked".to_owned())));
         assert!(!is_transient(&CoreError::Validation("нет id".to_owned())));
         assert!(!is_transient(&CoreError::ScopeMissing));
         assert!(!is_transient(&CoreError::NoKey));

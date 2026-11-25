@@ -1,26 +1,388 @@
-/* Базовые стили заглушки Koteyye Media Studio. */
+/* Стили Koteyye Media Studio: темы, layout сайдбара, настройки, онбординг.
+   Токены тем в рантайме задаёт km_ui_core::theme_vars (<style> в корне App);
+   значения :root ниже — фолбэк до загрузки WASM (светлая тема «Воздух»). */
+
+:root {
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --border: #dfe3e8;
+  --text: #1a1d23;
+  --text-muted: #6b7280;
+  --accent: #e05616;
+  --accent-hover: #ff7333;
+  --on-accent: #1a0d05;
+  color-scheme: light;
+}
+
+/* data-theme ставится на <html> эффектом состояния (state.rs). */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
 
 body {
   margin: 0;
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-  background: #141414;
-  color: #f2f2f2;
+  background: var(--bg);
+  color: var(--text);
 }
 
-h1 {
-  margin: 0;
-  font-size: 28px;
+/* Каркас: сайдбар слева, контент справа. */
+.app-shell {
+  display: flex;
+  min-height: 100vh;
+}
+
+.sidebar {
+  width: 220px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px 12px;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+}
+
+.sidebar-brand {
+  padding: 4px 8px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 14px;
+  color: var(--text-muted);
+  text-decoration: none;
+}
+
+.nav-item:hover {
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* Активный пункт — акцент #e05616 (active_class роутера). */
+.nav-item.active {
+  background: var(--bg);
+  color: var(--accent);
   font-weight: 600;
 }
 
-p {
+.nav-icon {
+  width: 20px;
+  text-align: center;
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  padding: 4px 8px;
+}
+
+.content {
+  flex: 1;
+  min-width: 0;
+  padding: 24px 32px;
+}
+
+.content h1 {
+  margin: 0 0 8px;
+  font-size: 24px;
+  font-weight: 600;
+}
+
+.content h2 {
+  margin: 0 0 16px;
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.muted {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.error-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  font-size: 14px;
+  color: var(--accent);
+}
+
+.error-banner-text {
+  flex: 1;
+}
+
+/* Кнопка ручного закрытия баннера ошибки (сигнал error → None). */
+.banner-dismiss {
+  flex-shrink: 0;
+  padding: 0 4px;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.banner-dismiss:hover {
+  color: var(--accent-hover);
+}
+
+/* Экран настроек: секции с полями (ключ, папка, язык, тема, баланс). */
+.settings {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-width: 560px;
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.section-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.field-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.text-input,
+.settings-select {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 14px;
+}
+
+.text-input {
+  flex: 1;
+  min-width: 200px;
+}
+
+.settings-select {
+  min-width: 200px;
+}
+
+.btn {
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.btn-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.btn-primary:hover:not(:disabled) {
+  border-color: var(--accent-hover);
+  background: var(--accent-hover);
+  color: var(--on-accent);
+}
+
+/* Статус проверки соединения: ok — текст с ✓, ошибка — акцент, ожидание — muted. */
+.status {
+  margin: 0;
+  font-size: 13px;
+}
+
+.status-ok {
+  color: var(--text);
+}
+
+.status-error {
+  color: var(--accent);
+}
+
+.status-muted {
+  color: var(--text-muted);
+}
+
+.folder-path {
+  flex: 1;
+  min-width: 200px;
+  font-size: 14px;
+  color: var(--text);
+  word-break: break-all;
+}
+
+.folder-path.muted {
+  color: var(--text-muted);
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.checkbox-row input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+.balance-line {
   margin: 0;
   font-size: 16px;
-  color: #a3a3a3;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.balance-line.muted {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+/* Онбординг: полноэкранная карточка по центру (вне сайдбара). */
+.onboarding {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px;
+}
+
+.onboarding-card {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  max-width: 560px;
+  padding: 32px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+}
+
+.onboarding-brand {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.onboarding-card h1 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 600;
+}
+
+.onboarding-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.onboarding-intro {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+/* Индикатор прогресса: точки шагов + счётчик. */
+.onboarding-steps {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.onboarding-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--border);
+}
+
+.onboarding-dot.done {
+  background: var(--text-muted);
+}
+
+.onboarding-dot.active {
+  background: var(--accent);
+}
+
+.onboarding-step-count {
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* Подсказка о последствиях пропуска (видна до решения). */
+.onboarding-hint {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* Предупреждение о пропущенном шаге — акцент, как баннер ошибки. */
+.onboarding-warning {
+  padding: 10px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--accent);
+}
+
+.onboarding-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.onboarding-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
 }
