@@ -73,10 +73,19 @@ const SCREEN_KEYS: &[&str] = &[
     "settings.available",
     // onboarding
     "onboarding.welcome",
+    "onboarding.intro",
     "onboarding.step_key",
+    "onboarding.key_hint",
     "onboarding.step_folder",
+    "onboarding.folder_hint",
     "onboarding.done",
+    "onboarding.done_text",
+    "onboarding.finish",
+    "onboarding.next",
+    "onboarding.back",
     "onboarding.skip",
+    "onboarding.skip_key_warning",
+    "onboarding.skip_folder_warning",
 ];
 
 #[test]

@@ -49,6 +49,14 @@ pub struct AppState {
     /// (`None`), отказ — записывает причину. Баннер также закрывается вручную
     /// (кнопка в [`crate::components::layout::Layout`]).
     pub error: Signal<Option<String>>,
+    /// Первый запуск: стартовая проверка не нашла ключа ([`needs_onboarding`]).
+    /// Выставляется один раз в [`AppState::init`]/`load`; редирект в онбординг
+    /// принимает решение по этому сигналу (см. [`crate::app`]).
+    pub onboarding_needed: Signal<bool>,
+    /// Онбординг завершён в этой сессии (ключ задан ИЛИ пропущен осознанно).
+    /// Пока `true`, редирект не срабатывает даже без ключа; при следующем
+    /// запуске без ключа онбординг предлагается снова (сигнал не персистится).
+    pub onboarding_done: Signal<bool>,
     /// Монотонный счётчик persist-поколений: захватывается на старте сохранения,
     /// чтобы откат упавшей задачи не затёр более новый оптимистичный apply.
     persist_gen: Signal<u64>,
@@ -82,6 +90,8 @@ impl AppState {
             balance: Signal::new(None),
             busy: Signal::new(true),
             error: Signal::new(None),
+            onboarding_needed: Signal::new(false),
+            onboarding_done: Signal::new(false),
             persist_gen: Signal::new(0),
         }
     }
@@ -206,7 +216,8 @@ impl AppState {
         callback.forget();
     }
 
-    /// Стартовая загрузка: настройки, восстановление Pending, история, баланс, каталоги.
+    /// Стартовая загрузка: настройки, проверка ключа, восстановление Pending,
+    /// история, баланс, каталоги.
     ///
     /// Каждый успех очищает баннер ошибки, отказ — записывает причину
     /// (семантика «последняя операция», см. поле `error`).
@@ -217,6 +228,14 @@ impl AppState {
             Ok(settings) => self.apply_settings(settings),
             Err(e) => self.error.set(Some(e)),
         }
+        // Проверка ключа первого запуска: Ok(false) — ключа нет/отклонён →
+        // онбординг; Err — соединение не проверено, редирект не нужен.
+        let check = ipc::test_connection().await;
+        match &check {
+            Ok(_) => self.error.set(None),
+            Err(e) => self.error.set(Some(e.clone())),
+        }
+        self.onboarding_needed.set(needs_onboarding(check));
         // Восстанавливаем Pending-записи, пережившие перезапуск, затем читаем историю.
         match ipc::recover_pending().await {
             Ok(_) => self.error.set(None),
@@ -284,6 +303,16 @@ impl AppState {
             }
         }
     }
+}
+
+/// Решает, нужен ли онбординг первого запуска по результату стартовой проверки.
+///
+/// `Ok(false)` — ключа нет в keychain или CI ответил 401: показываем онбординг.
+/// `Ok(true)` — ключ принят. `Err` — соединение не проверено (сеть/5xx), ключ
+/// при этом может быть задан: существующего пользователя в онбординг не уводим.
+#[must_use]
+pub fn needs_onboarding(check: Result<bool, String>) -> bool {
+    matches!(check, Ok(false))
 }
 
 /// Решает, нужен ли откат при ошибке persist и какие настройки применить.
@@ -404,6 +433,23 @@ mod tests {
     fn parse_lang_unknown_falls_back_to_ru() {
         assert_eq!(parse_lang(""), Lang::Ru);
         assert_eq!(parse_lang("de"), Lang::Ru);
+    }
+
+    #[test]
+    fn onboarding_needed_when_key_absent_or_rejected() {
+        // Ok(false) — ключа нет или 401: первый запуск, нужен онбординг.
+        assert!(needs_onboarding(Ok(false)));
+    }
+
+    #[test]
+    fn onboarding_not_needed_when_key_accepted() {
+        assert!(!needs_onboarding(Ok(true)));
+    }
+
+    #[test]
+    fn onboarding_not_needed_when_connection_unverified() {
+        // Сеть/5xx — ключ может быть задан; существующего пользователя не трогаем.
+        assert!(!needs_onboarding(Err("сеть недоступна".to_owned())));
     }
 
     fn settings_with_theme(theme: Theme) -> Settings {

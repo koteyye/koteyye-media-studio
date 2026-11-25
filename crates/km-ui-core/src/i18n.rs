@@ -110,10 +110,37 @@ fn entry(key: &str) -> Option<(&'static str, &'static str)> {
         "settings.available" => ("Доступно", "Available"),
         // Онбординг.
         "onboarding.welcome" => ("Добро пожаловать", "Welcome"),
+        "onboarding.intro" => (
+            "Приложение генерирует изображения, видео и аудио через Cheaper Inference. Настроим его за несколько шагов.",
+            "The app generates images, video and audio via Cheaper Inference. Let's set it up in a few steps.",
+        ),
         "onboarding.step_key" => ("Введите API-ключ", "Enter your API key"),
+        "onboarding.key_hint" => (
+            "Создайте ключ в личном кабинете Cheaper Inference. Для показа реального баланса добавьте scope account:read.",
+            "Create a key in your Cheaper Inference account. Add the account:read scope to show the real balance.",
+        ),
         "onboarding.step_folder" => ("Выберите папку для сохранения", "Choose a save folder"),
+        "onboarding.folder_hint" => (
+            "Сгенерированные файлы будут сохраняться в эту папку.",
+            "Generated files will be saved to this folder.",
+        ),
         "onboarding.done" => ("Готово", "Done"),
+        "onboarding.done_text" => (
+            "Настройка завершена. Приятной работы!",
+            "Setup is complete. Enjoy!",
+        ),
+        "onboarding.finish" => ("Начать работу", "Start working"),
+        "onboarding.next" => ("Далее", "Next"),
+        "onboarding.back" => ("Назад", "Back"),
         "onboarding.skip" => ("Пропустить", "Skip"),
+        "onboarding.skip_key_warning" => (
+            "Без ключа доступен только каталог моделей. Генерация потребует ключ — его можно задать в Настройках.",
+            "Without a key only the model catalog is available. Generation will require a key — you can set it later in Settings.",
+        ),
+        "onboarding.skip_folder_warning" => (
+            "Без папки сохранения генерация недоступна — файлы некуда записывать. Папку можно выбрать в Настройках.",
+            "Without a save folder generation is unavailable — there is nowhere to write files. You can choose a folder in Settings.",
+        ),
         _ => return None,
     })
 }

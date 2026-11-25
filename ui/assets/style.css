@@ -1,4 +1,4 @@
-/* Стили Koteyye Media Studio: темы, layout сайдбара, экраны-заглушки.
+/* Стили Koteyye Media Studio: темы, layout сайдбара, настройки, онбординг.
    Токены тем в рантайме задаёт km_ui_core::theme_vars (<style> в корне App);
    значения :root ниже — фолбэк до загрузки WASM (светлая тема «Воздух»). */
 
@@ -283,4 +283,106 @@ body {
   font-size: 13px;
   font-weight: 400;
   color: var(--text-muted);
+}
+
+/* Онбординг: полноэкранная карточка по центру (вне сайдбара). */
+.onboarding {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px;
+}
+
+.onboarding-card {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  max-width: 560px;
+  padding: 32px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+}
+
+.onboarding-brand {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.onboarding-card h1 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 600;
+}
+
+.onboarding-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.onboarding-intro {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+/* Индикатор прогресса: точки шагов + счётчик. */
+.onboarding-steps {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.onboarding-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--border);
+}
+
+.onboarding-dot.done {
+  background: var(--text-muted);
+}
+
+.onboarding-dot.active {
+  background: var(--accent);
+}
+
+.onboarding-step-count {
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* Подсказка о последствиях пропуска (видна до решения). */
+.onboarding-hint {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* Предупреждение о пропущенном шаге — акцент, как баннер ошибки. */
+.onboarding-warning {
+  padding: 10px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--accent);
+}
+
+.onboarding-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.onboarding-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
 }
