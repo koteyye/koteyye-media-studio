@@ -75,14 +75,15 @@ pub async fn cmd_set_api_key(state: &AppState, key: &str) -> Result<(), String> 
 
 /// Проверка подключения: лёгкий auth-запрос `GET /v1/models` с Bearer.
 ///
-/// `true` — ключ принят (200), `false` — ключа нет или CI ответил 401.
-/// Прочие ошибки (сеть, 5xx) пробрасываются: подключение не проверено.
+/// `true` — ключ принят (200), `false` — ключа нет (`Ok(None)` в keychain)
+/// или CI ответил 401. Прочие ошибки (сеть, 5xx, сбой чтения keychain)
+/// пробрасываются: подключение не проверено, редиректа в онбординг нет.
 ///
 /// # Errors
 ///
-/// Строка с причиной при ошибках, отличных от 401.
+/// Строка с причиной при ошибках, отличных от 401, и при сбое чтения keychain.
 pub async fn cmd_test_connection(state: &AppState) -> Result<bool, String> {
-    let Some(key) = state.key_store.get() else {
+    let Some(key) = state.key_store.get()? else {
         return Ok(false);
     };
     match state.client(&key).models().await {
@@ -99,12 +100,12 @@ pub async fn cmd_test_connection(state: &AppState) -> Result<bool, String> {
 ///
 /// # Errors
 ///
-/// Строка с причиной при сбое запроса или разбора ответа.
+/// Строка с причиной при сбое запроса, разбора ответа или чтения keychain.
 pub async fn cmd_fetch_models(
     state: &AppState,
     kind: MediaKind,
 ) -> Result<Vec<CatalogModel>, String> {
-    let key = state.key_store.get();
+    let key = state.key_store.get()?;
     let client = state.client(key.as_deref().unwrap_or_default());
     let models = match key {
         Some(_) => client.models().await,
@@ -121,15 +122,17 @@ pub async fn cmd_fetch_models(
 /// # Errors
 ///
 /// [`CoreError::NoKey`], если ключ не задан; [`CoreError::Validation`], если
-/// не задана папка сохранения; ошибки ядра при генерации (запись истории
-/// при этом переведена в `Failed`).
+/// не задана папка сохранения; ошибки ядра при генерации: definitive
+/// переводят запись истории в `Failed`, транзиентные после фиксации
+/// `request_id` оставляют `Pending` (оплаченная генерация восстановима);
+/// сбой чтения keychain пробрасывается до запуска.
 pub async fn cmd_generate(
     state: &AppState,
     req: GenerationRequest,
 ) -> Result<HistoryRecord, String> {
     let key = state
         .key_store
-        .get()
+        .get()?
         .ok_or_else(|| CoreError::NoKey.to_string())?;
     let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
     if settings.local_folder.is_empty() {
@@ -166,7 +169,9 @@ pub async fn cmd_delete_history(state: &AppState, id: &str) -> Result<(), String
 
 /// Восстанавливает `Pending`-записи, пережившие перезапуск.
 ///
-/// Вызывается и при старте (фоном, из `setup`), и вручную из UI. После
+/// Вызывается и при старте (фоном, из `setup`), и вручную из UI. Проходы
+/// сериализованы локом [`AppState::recovery_lock`]: параллельные вызовы не
+/// обрабатывают одни записи дважды (без дублей файлов и событий). После
 /// восстановления завершённых записей шлёт `balance:updated`. Без ключа
 /// CI не опросить, без папки сохранения некуда писать файлы: записи остаются
 /// `Pending` до следующего запуска с ключом и папкой (оплаченная генерация
@@ -174,10 +179,15 @@ pub async fn cmd_delete_history(state: &AppState, id: &str) -> Result<(), String
 ///
 /// # Errors
 ///
-/// Строка с причиной при сбое хранилища; ошибки CI отдельных записей
-/// переводят их в `Failed`, а не прерывают восстановление.
+/// Строка с причиной при сбое хранилища или чтении ключа из keychain;
+/// definitive-ошибки CI отдельных записей переводят их в `Failed`,
+/// транзиентные (сеть, таймаут, ввод-вывод, БД, HTTP 5xx/429) оставляют
+/// `Pending` — и те и другие не прерывают восстановление остальных.
 pub async fn cmd_recover_pending(state: &AppState) -> Result<Vec<HistoryRecord>, String> {
-    let Some(key) = state.key_store.get() else {
+    // Сериализация проходов: setup при старте и load() UI зовут эту команду;
+    // без лока оба прочитали бы одни Pending и скачали бы файлы дважды.
+    let _guard = state.recovery_lock().lock().await;
+    let Some(key) = state.key_store.get()? else {
         // Без ключа запрос с пустым Bearer дал бы 401 и ядро сожгло бы
         // восстановимые записи в Failed навсегда — оставляем Pending.
         return Ok(Vec::new());
@@ -200,11 +210,11 @@ pub async fn cmd_recover_pending(state: &AppState) -> Result<Vec<HistoryRecord>,
 ///
 /// # Errors
 ///
-/// Строка с причиной при сбое хранилища; 403 от CI скрывает реальный баланс,
-/// оставляя локальный (обрабатывается ядром).
+/// Строка с причиной при сбое хранилища или чтения keychain; 403 от CI
+/// скрывает реальный баланс, оставляя локальный (обрабатывается ядром).
 pub async fn cmd_fetch_balance(state: &AppState) -> Result<BalanceView, String> {
     let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
-    let key = state.key_store.get().unwrap_or_default();
+    let key = state.key_store.get()?.unwrap_or_default();
     let jobs = state.jobs(state.client(&key), PathBuf::from(settings.local_folder))?;
     jobs.balance_view(settings.show_real_balance)
         .await

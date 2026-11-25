@@ -162,7 +162,8 @@ pub async fn set_api_key(key: &str) -> Result<(), String> {
 ///
 /// # Errors
 ///
-/// Строка с причиной при ошибках, отличных от 401 (сеть, 5xx).
+/// Строка с причиной при ошибках, отличных от 401 (сеть, 5xx), и при сбое
+/// чтения keychain: подключение не проверено, редиректа в онбординг нет.
 pub async fn test_connection() -> Result<bool, String> {
     invoke_command("test_connection", json!({})).await
 }
@@ -207,8 +208,10 @@ pub async fn delete_history(id: &str) -> Result<(), String> {
 ///
 /// # Errors
 ///
-/// Строка с причиной при сбое хранилища; ошибки CI отдельных записей
-/// переводят их в `Failed`, а не прерывают восстановление.
+/// Строка с причиной при сбое хранилища или чтения keychain; definitive-ошибки
+/// CI отдельных записей переводят их в `Failed`, транзиентные (сеть, таймаут,
+/// ввод-вывод, БД, HTTP 5xx/429) оставляют `Pending` до следующего запуска.
+/// Сбой одной записи не прерывает восстановление остальных.
 pub async fn recover_pending() -> Result<Vec<HistoryRecord>, String> {
     invoke_command("recover_pending", json!({})).await
 }

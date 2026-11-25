@@ -6,7 +6,8 @@
 //! остальными настройками через [`AppState::persist_settings`] (generation
 //! guard отката).
 //!
-//! Пропуск ключа допустим (каталог доступен без ключа), пропуск папки — с
+//! Пропуск ключа допустим (каталог доступен без ключа). Пропуск папки
+//! сохраняет текущее значение (предзаполнение из настроек) и сопровождается
 //! предупреждением: генерация требует и ключ, и папку (`cmd_generate`), задать
 //! их можно позже в Настройках. Завершение ставит `onboarding_done` и уводит
 //! в Studio; редирект первого запуска — в [`crate::app`].
@@ -80,7 +81,8 @@ enum KeyStatus {
     Ok,
     /// Ключа нет или CI ответил 401 (`test_connection` → `false`).
     Rejected,
-    /// Подключение не проверено: сеть/5xx (`test_connection` → `Err`).
+    /// Подключение не проверено: сеть/5xx или сбой чтения keychain
+    /// (`test_connection` → `Err`).
     Unverified(String),
     /// Keychain не принял ключ (`set_api_key` → `Err`).
     KeychainError(String),
@@ -107,6 +109,16 @@ fn key_step_can_proceed(status: &KeyStatus) -> bool {
 /// Можно ли перейти дальше с шага папки: папка выбрана (непустой путь).
 fn folder_step_can_proceed(folder: &str) -> bool {
     !folder.is_empty()
+}
+
+/// «Пропустить» на шаге папки: переход к итогу без изменения выбора.
+///
+/// Пропуск сохраняет текущее значение папки (предзаполнение из настроек):
+/// очистка отключила бы генерацию и восстановление оплаченных `Pending`
+/// (`cmd_recover_pending` без папки ничего не восстанавливает). Явное «без
+/// папки» — только через пустое предзаполнение первого запуска.
+fn skip_folder_step(mut step: Signal<Step>) {
+    step.set(Step::Done);
 }
 
 /// Экран онбординга первого запуска: приветствие, ключ, папка, итог.
@@ -397,10 +409,7 @@ pub fn Onboarding() -> Element {
             button {
                 class: "btn",
                 disabled: folder_busy_value,
-                onclick: move |_| {
-                    folder.set(String::new());
-                    step.set(Step::Done);
-                },
+                onclick: move |_| skip_folder_step(step),
                 {skip_label}
             }
             button {
@@ -498,11 +507,12 @@ async fn save_key(
 
 /// Финал онбординга: сохраняет настройки и переходит в Studio.
 ///
-/// Папка (выбранная или пустая при пропуске) записывается вместе с текущими
-/// настройками через `persist_settings` (оптимистичное применение + откат с
-/// generation guard при ошибке). При успехе ставит `onboarding_done` (редирект
-/// больше не срабатывает) и заменяет маршрут на Studio; при отказе остаётся
-/// на экране — ошибка видна в баннере, попытку можно повторить.
+/// Папка (выбранная или сохранённая при пропуске — пропуск не затирает
+/// предзаполнение) записывается вместе с текущими настройками через
+/// `persist_settings` (оптимистичное применение + откат с generation guard
+/// при ошибке). При успехе ставит `onboarding_done` (редирект больше не
+/// срабатывает) и заменяет маршрут на Studio; при отказе остаётся на экране —
+/// ошибка видна в баннере, попытку можно повторить.
 async fn finish(mut state: AppState, folder: Signal<String>, mut finishing: Signal<bool>) {
     finishing.set(true);
     let next = AppSettings {
@@ -589,5 +599,27 @@ mod tests {
     fn folder_step_proceeds_only_with_chosen_folder() {
         assert!(folder_step_can_proceed("/media"));
         assert!(!folder_step_can_proceed(""));
+    }
+
+    #[test]
+    fn skip_folder_keeps_prefilled_path() {
+        // Сигналы живут в scope Dioxus-рантайма: минимальный VirtualDom даёт
+        // скоуп без рендеринга экрана (хуки и роутер не нужны).
+        fn empty() -> Element {
+            VNode::empty()
+        }
+        let dom = VirtualDom::new(empty);
+        dom.runtime().in_scope(ScopeId::ROOT, || {
+            // Предзаполнение из настроек (повторный онбординг): папка выбрана.
+            let folder = Signal::new("/media".to_owned());
+            let step = Signal::new(Step::Folder);
+            skip_folder_step(step);
+            assert_eq!(
+                (folder)(),
+                "/media",
+                "пропуск сохраняет предзаполненную папку, а не затирает её"
+            );
+            assert_eq!((step)(), Step::Done, "пропуск ведёт к итогу");
+        });
     }
 }

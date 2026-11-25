@@ -1675,6 +1675,176 @@ async fn run_transient_download_keeps_pending() {
 }
 
 #[tokio::test]
+async fn run_transient_download_persists_cost_for_recovery() {
+    let server = MockServer::start().await;
+    // generate_video 200 с billing; ссылка на закрытый порт -> Network.
+    // Оплаченная стоимость обязана персиститься сразу после ответа CI:
+    // recovery-эндпоинт billing не отдаёт, иначе цена потеряется навсегда.
+    let guard = Mock::given(method("POST"))
+        .and(path("/v1/videos/generations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "vid_cost",
+            "status": "completed",
+            "videos": [{"url": "http://127.0.0.1:1/signed/v.mp4", "content_type": "video/mp4"}],
+            "request_id": "req_run_cost",
+            "billing": {"billed_cost_usd": "0.600000"},
+        })))
+        .expect(1)
+        .mount_as_scoped(&server)
+        .await;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("h.db");
+    let storage = Storage::open(&db).expect("БД");
+    let reader = Storage::open(&db).expect("reader");
+    let (jobs, _events) = jobs_with(client_for(&server), storage, tmp.path().join("media"));
+
+    let err = jobs
+        .run(video_request())
+        .await
+        .expect_err("сбой скачивания — ошибка для UI");
+    assert!(
+        matches!(err, CoreError::Network(_)),
+        "ожидался Network: {err:?}"
+    );
+
+    // Стоимость уже в Pending-записи — тем же патчем, что и request_id.
+    let history = reader.history(&all()).expect("history");
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].status, JobStatus::Pending);
+    assert_eq!(
+        history[0].request_id.as_deref(),
+        Some("req_run_cost"),
+        "request_id зафиксирован до скачивания"
+    );
+    assert_eq!(
+        history[0].cost_usd,
+        Some(0.6),
+        "оплаченная стоимость персистится сразу после ответа CI, до скачивания"
+    );
+    drop(guard);
+
+    // Recovery завершает запись, не теряя цену; расход учитывает оплату.
+    let file_url = format!("{}/signed/ok.mp4", server.uri());
+    Mock::given(method("GET"))
+        .and(path("/v1/generations/req_run_cost"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "request_id": "req_run_cost",
+            "endpoint": "/v1/videos/generations",
+            "created_at": "2026-11-24T10:00:00Z",
+            "expires_at": "2026-12-01T10:00:00Z",
+            "files": [{
+                "index": 0, "type": "video", "content_type": "video/mp4",
+                "size_bytes": 2, "url": file_url,
+            }],
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/signed/ok.mp4"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"hi"))
+        .mount(&server)
+        .await;
+
+    let recovered = jobs.recover_pending().await.expect("recover");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].status, JobStatus::Completed);
+    assert_eq!(
+        recovered[0].cost_usd,
+        Some(0.6),
+        "recovery сохраняет оплаченную стоимость"
+    );
+    let history = reader.history(&all()).expect("history");
+    assert_eq!(
+        history[0].cost_usd,
+        Some(0.6),
+        "стоимость в БД после recovery"
+    );
+    let view = jobs.balance_view(false).await.expect("balance_view");
+    assert!(
+        (view.local_spend_usd - 0.6).abs() < 1e-9,
+        "оплаченная стоимость попала в total_spend_usd: {}",
+        view.local_spend_usd
+    );
+}
+
+#[tokio::test]
+async fn run_image_transient_download_persists_cost_for_recovery() {
+    let server = MockServer::start().await;
+    // images 200 с billing; элемент с url (не b64) на закрытый порт -> Network
+    // после ответа CI. Стоимость изображений персистится так же, как у видео.
+    let guard = Mock::given(method("POST"))
+        .and(path("/v1/images/generations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"url": "http://127.0.0.1:1/signed/i.png", "content_type": "image/png"}],
+            "request_id": "img_cost",
+            "billing": {"billed_cost_usd": "0.040000"},
+        })))
+        .expect(1)
+        .mount_as_scoped(&server)
+        .await;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("h.db");
+    let storage = Storage::open(&db).expect("БД");
+    let reader = Storage::open(&db).expect("reader");
+    let (jobs, _events) = jobs_with(client_for(&server), storage, tmp.path().join("media"));
+
+    let err = jobs
+        .run(image_request())
+        .await
+        .expect_err("сбой скачивания — ошибка для UI");
+    assert!(
+        matches!(err, CoreError::Network(_)),
+        "ожидался Network: {err:?}"
+    );
+
+    let history = reader.history(&all()).expect("history");
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].status, JobStatus::Pending);
+    assert_eq!(history[0].request_id.as_deref(), Some("img_cost"));
+    assert_eq!(
+        history[0].cost_usd,
+        Some(0.04),
+        "оплаченная стоимость изображения персистится до скачивания"
+    );
+    drop(guard);
+
+    // Recovery завершает запись с сохранённой ценой; расход учитывает оплату.
+    let file_url = format!("{}/signed/ok.png", server.uri());
+    Mock::given(method("GET"))
+        .and(path("/v1/generations/img_cost"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "request_id": "img_cost",
+            "endpoint": "/v1/images/generations",
+            "created_at": "2026-11-24T10:00:00Z",
+            "expires_at": "2026-12-01T10:00:00Z",
+            "files": [{
+                "index": 0, "type": "image", "content_type": "image/png",
+                "size_bytes": 2, "url": file_url,
+            }],
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/signed/ok.png"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"hi"))
+        .mount(&server)
+        .await;
+
+    let recovered = jobs.recover_pending().await.expect("recover");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].status, JobStatus::Completed);
+    assert_eq!(recovered[0].cost_usd, Some(0.04));
+    let view = jobs.balance_view(false).await.expect("balance_view");
+    assert!(
+        (view.local_spend_usd - 0.04).abs() < 1e-9,
+        "оплаченная стоимость попала в total_spend_usd: {}",
+        view.local_spend_usd
+    );
+}
+
+#[tokio::test]
 async fn video_processing_keeps_pending() {
     for status in ["processing", "pending", "in_progress"] {
         let server = MockServer::start().await;

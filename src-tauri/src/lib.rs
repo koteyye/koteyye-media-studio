@@ -54,6 +54,8 @@ pub fn run() {
             app.manage(Arc::clone(&state));
 
             // Восстановление незавершённых генераций — фоном, не блокируя запуск.
+            // Та же команда зовётся из UI (load); проходы сериализованы локом
+            // AppState::recovery_lock, поэтому дублей файлов и событий нет.
             tauri::async_runtime::spawn(async move {
                 if let Err(err) = commands::cmd_recover_pending(&state).await {
                     eprintln!("восстановление при старте не удалось: {err}");

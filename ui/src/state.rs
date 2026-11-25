@@ -308,8 +308,9 @@ impl AppState {
 /// Решает, нужен ли онбординг первого запуска по результату стартовой проверки.
 ///
 /// `Ok(false)` — ключа нет в keychain или CI ответил 401: показываем онбординг.
-/// `Ok(true)` — ключ принят. `Err` — соединение не проверено (сеть/5xx), ключ
-/// при этом может быть задан: существующего пользователя в онбординг не уводим.
+/// `Ok(true)` — ключ принят. `Err` — соединение не проверено (сеть/5xx, сбой
+/// чтения keychain), ключ при этом может быть задан: существующего
+/// пользователя в онбординг не уводим.
 #[must_use]
 pub fn needs_onboarding(check: Result<bool, String>) -> bool {
     matches!(check, Ok(false))
@@ -450,6 +451,15 @@ mod tests {
     fn onboarding_not_needed_when_connection_unverified() {
         // Сеть/5xx — ключ может быть задан; существующего пользователя не трогаем.
         assert!(!needs_onboarding(Err("сеть недоступна".to_owned())));
+    }
+
+    #[test]
+    fn onboarding_not_needed_when_keychain_unreadable() {
+        // Сбой чтения keychain (заблокирован, отказ prompt): ключ может быть
+        // задан — test_connection отдаёт Err, редиректа в онбординг нет.
+        assert!(!needs_onboarding(Err(
+            "не удалось прочитать ключ из keychain: доступ запрещён".to_owned()
+        )));
     }
 
     fn settings_with_theme(theme: Theme) -> Settings {

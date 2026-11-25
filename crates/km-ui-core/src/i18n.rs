@@ -138,8 +138,8 @@ fn entry(key: &str) -> Option<(&'static str, &'static str)> {
             "Without a key only the model catalog is available. Generation will require a key — you can set it later in Settings.",
         ),
         "onboarding.skip_folder_warning" => (
-            "Без папки сохранения генерация недоступна — файлы некуда записывать. Папку можно выбрать в Настройках.",
-            "Without a save folder generation is unavailable — there is nowhere to write files. You can choose a folder in Settings.",
+            "«Пропустить» оставит текущую папку. Без папки сохранения генерация недоступна — файлы некуда записывать; папку можно выбрать в Настройках.",
+            "Skip keeps the current folder. Without a save folder generation is unavailable — there is nowhere to write files; you can choose a folder in Settings.",
         ),
         _ => return None,
     })
