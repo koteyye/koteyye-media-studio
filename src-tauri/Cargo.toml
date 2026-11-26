@@ -1,0 +1,42 @@
+[package]
+name = "koteyye-media-studio"
+default-run = "koteyye-media-studio"
+description = "Koteyye Media Studio — десктопная студия генерации медиа (Tauri 2)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[build-dependencies]
+tauri-build = { workspace = true }
+
+[dependencies]
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
+dirs = "7.0.0"
+km-core = { version = "2.0.0", path = "../crates/km-core" }
+km-shared = { version = "2.0.0", path = "../crates/km-shared" }
+tauri = { workspace = true, features = ["protocol-asset"] }
+# Нативные диалоги (выбор папки сохранения) и opener (открыть файл / показать в папке).
+# opener — актуальный плагин Tauri 2: shell.open устарел с 2.1.0 в его пользу.
+tauri-plugin-dialog = "2.8.4"
+tauri-plugin-opener = "2.7.3"
+# API-ключ — в системном keychain: macOS Keychain и Windows Credential Manager.
+# Linux не целевая платформа (см. План 1), secret-service не подключаем.
+keyring = { version = "3.6.3", features = ["apple-native", "windows-native"] }
+# Упрощение verbatim-путей (\\?\) Windows перед передачей в ShellExecuteExW:
+# fs::canonicalize даёт префикс, который shell-API не принимает.
+dunce = "1.0.5"
+tauri-plugin-updater = "2.14.1"
+tauri-plugin-single-instance = "2.5.5"
+
+serde_json = "1.0.154"
+serde = { version = "1.0.229", features = ["derive"] }
+reqwest = { version = "0.13.5", features = ["json"] }
+subtle = "2.6.1"
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["io-std", "io-util", "macros", "net", "rt", "signal", "sync", "time"] }
+uuid = { version = "1.29.3", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["rt-multi-thread"] }
+wiremock = "0.6.5"

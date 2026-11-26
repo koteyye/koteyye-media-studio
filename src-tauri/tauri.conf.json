@@ -1,0 +1,47 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Koteyye Media Studio v2",
+  "version": "2.0.0",
+  "identifier": "ru.koteyye.media-studio",
+  "plugins": {
+    "updater": {
+      "pubkey": "",
+      "requireSignedVersion": true,
+      "endpoints": ["https://github.com/koteyye/koteyye-media-studio/releases/latest/download/latest.json"]
+    }
+  },
+  "build": {
+    "beforeDevCommand": { "script": "dx serve --web --port 8080 --open false", "cwd": "../ui" },
+    "devUrl": "http://localhost:8080",
+    "beforeBuildCommand": { "script": "dx bundle --platform web --release", "cwd": "../ui" },
+    "frontendDist": "../ui/dist/public"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "dragDropEnabled": false,
+        "title": "Koteyye Media Studio v2",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 600
+      }
+    ],
+    "security": {
+      "assetProtocol": { "enable": true, "scope": [] },
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost asset: http://asset.localhost; img-src 'self' data: asset: http://asset.localhost; media-src 'self' data: asset: http://asset.localhost; object-src 'none'; base-uri 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

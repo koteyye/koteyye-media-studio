@@ -1,0 +1,25 @@
+[package]
+name = "km-ui"
+description = "UI Koteyye Media Studio на Dioxus, компилируется в WASM"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dioxus = { workspace = true, features = ["web", "router"] }
+km-shared = { version = "2.0.0", path = "../crates/km-shared" }
+# Чистая UI-логика: i18n (tr), токены тем (theme_vars), форматтеры.
+km-ui-core = { version = "2.0.0", path = "../crates/km-ui-core" }
+# IPC-биндинг (src/ipc.rs): serde JSON через границу WASM, Promise -> Future.
+serde = "1.0.229"
+serde_json = "1.0.154"
+wasm-bindgen = "0.2.130"
+wasm-bindgen-futures = "0.4.80"
+futures-channel = "0.3.34"
+js-sys = "0.3.107"
+# Window/Document/Element — data-theme и lang на <html>; MediaQueryList — резолв System.
+web-sys = { version = "0.3.107", features = [
+    "console", "Window", "Document", "KeyboardEvent", "Element", "MediaQueryList", "MediaQueryListEvent", "Navigator",
+    "Blob", "File", "FileReader", "HtmlDialogElement", "HtmlInputElement", "AudioBuffer", "CanvasRenderingContext2d",
+    "CssStyleDeclaration", "HtmlCanvasElement", "HtmlMediaElement", "OfflineAudioContext", "Response", "Url",
+] }

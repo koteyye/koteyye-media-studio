@@ -1,0 +1,1906 @@
+{
+  "models": [
+    {
+      "id": "eleven-v4",
+      "context_length": null,
+      "max_output_tokens": null,
+      "aliases": [],
+      "model_type": "speech",
+      "endpoint": "/v1/audio/speech",
+      "supported_endpoints": [
+        "/v1/audio/speech"
+      ],
+      "input_per_million": "26.000000",
+      "output_per_million": "0.000000",
+      "cache_read_per_million": "0",
+      "cache_write_per_million": "0",
+      "image_output_per_million": null,
+      "media_input_unit_price": null,
+      "media_unit_price": null,
+      "media_unit": null,
+      "media_prices": {},
+      "image_pricing_unit": "token",
+      "reference_input_per_million": "40.000000",
+      "reference_output_per_million": "0.000000",
+      "reference_cache_read_per_million": null,
+      "reference_cache_write_per_million": null,
+      "reference_image_output_per_million": null,
+      "reference_media_input_unit_price": null,
+      "reference_media_unit_price": null,
+      "reference_media_prices": {},
+      "discount_percent": "35.00",
+      "logo_url": "/lobe/elevenlabs-avatar.svg",
+      "provider_name": "ElevenLabs",
+      "primary_model_id": null,
+      "is_visible": true,
+      "supports_vision": false,
+      "supports_video": false,
+      "supports_reasoning": false,
+      "reasoning_capability_mode": "auto",
+      "supports_streaming": false,
+      "supports_image_edit": false,
+      "features": [],
+      "is_free": false,
+      "available_until": null,
+      "input_token_price_threshold": null,
+      "input_per_million_above_threshold": null,
+      "output_per_million_above_threshold": null,
+      "zero_data_retention": false,
+      "zero_data_retention_route": "none",
+      "default_pricing_scope": {
+        "zdr": false,
+        "model": "eleven-v4",
+        "region": null,
+        "protocol": "audio_speech",
+        "serviceTier": "standard",
+        "pricingVariant": "default"
+      },
+      "pricing_scopes": [
+        {
+          "id": "ff2c42e6-05ae-4cb2-a955-983ff046e404",
+          "version": "233449811fe7e0f668c0d6fe93f9217b1b75029263f076f3afe38d504301d6a0",
+          "scope": {
+            "zdr": false,
+            "model": "eleven-v4",
+            "region": null,
+            "protocol": "audio_speech",
+            "serviceTier": "standard",
+            "pricingVariant": "default"
+          },
+          "discount": "35",
+          "tiers": [
+            {
+              "id": "ea512ad5-3702-45bf-a56e-aab2ce96efb1",
+              "rates": {
+                "characters": "0.000026000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "ea512ad5-3702-45bf-a56e-aab2ce96efb1",
+              "rates": {
+                "characters": "0.00004"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795524686317,
+          "expiresAt": 1796133686236
+        }
+      ]
+    },
+    {
+      "id": "flux-2-pro",
+      "context_length": 67300,
+      "max_output_tokens": 67300,
+      "aliases": [],
+      "model_type": "image",
+      "endpoint": "/v1/images/generations",
+      "supported_endpoints": [
+        "/v1/images/generations",
+        "/v1/images/edits"
+      ],
+      "input_per_million": "0.000000",
+      "output_per_million": "0.000000",
+      "cache_read_per_million": "0",
+      "cache_write_per_million": "0",
+      "image_output_per_million": null,
+      "media_input_unit_price": null,
+      "media_unit_price": "0.019500",
+      "media_unit": "image",
+      "media_prices": {
+        "1MP": "0.019500",
+        "2MP": "0.029250",
+        "3MP": "0.039000",
+        "4MP": "0.048750"
+      },
+      "image_pricing_unit": "image",
+      "reference_input_per_million": "0.000000",
+      "reference_output_per_million": "0.000000",
+      "reference_cache_read_per_million": null,
+      "reference_cache_write_per_million": null,
+      "reference_image_output_per_million": null,
+      "reference_media_input_unit_price": null,
+      "reference_media_unit_price": "0.030000",
+      "reference_media_prices": {
+        "1MP": "0.030000",
+        "2MP": "0.045000",
+        "3MP": "0.060000",
+        "4MP": "0.075000"
+      },
+      "discount_percent": "35.00",
+      "logo_url": "/lobe/flux-avatar.svg",
+      "provider_name": "Black Forest Labs",
+      "primary_model_id": null,
+      "is_visible": true,
+      "supports_vision": false,
+      "supports_video": false,
+      "supports_reasoning": false,
+      "reasoning_capability_mode": "auto",
+      "supports_streaming": false,
+      "supports_image_edit": true,
+      "features": [
+        "image-edit"
+      ],
+      "is_free": false,
+      "available_until": null,
+      "input_token_price_threshold": null,
+      "input_per_million_above_threshold": null,
+      "output_per_million_above_threshold": null,
+      "zero_data_retention": false,
+      "zero_data_retention_route": "none",
+      "default_pricing_scope": {
+        "zdr": false,
+        "model": "flux-2-pro",
+        "region": null,
+        "protocol": "images_generations",
+        "serviceTier": "standard",
+        "pricingVariant": "default"
+      },
+      "pricing_scopes": [
+        {
+          "id": "1829316c-2536-4a6a-a497-66e9c2df9a79",
+          "version": "484bc214b4bbaae4393d21e1de3773a1db2f5f65689a6b6af7d08f042b049747",
+          "scope": {
+            "zdr": false,
+            "model": "flux-2-pro",
+            "region": null,
+            "protocol": "images_edits",
+            "serviceTier": "standard",
+            "pricingVariant": "1mp"
+          },
+          "discount": "35",
+          "tiers": [
+            {
+              "id": "add5cbc2-bf0f-4dac-aa8a-12a78f728c77",
+              "rates": {
+                "images": "0.019500000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "add5cbc2-bf0f-4dac-aa8a-12a78f728c77",
+              "rates": {
+                "images": "0.03"
+              },
+              "ceiling": {
+                "images": "0.028500000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795515086229,
+          "expiresAt": 1796119886229
+        },
+        {
+          "id": "9eaa3ec1-db19-4804-913f-cece9e04ba75",
+          "version": "408c6650cc9b33cc20fabd8901edb4473f49ededde4da1184de4f3f4126e3231",
+          "scope": {
+            "zdr": false,
+            "model": "flux-2-pro",
+            "region": null,
+            "protocol": "images_edits",
+            "serviceTier": "standard",
+            "pricingVariant": "2mp"
+          },
+          "discount": "35",
+          "tiers": [
+            {
+              "id": "f7b398d7-36f4-4f1f-8e9d-1fcd784cf29b",
+              "rates": {
+                "images": "0.029250000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "f7b398d7-36f4-4f1f-8e9d-1fcd784cf29b",
+              "rates": {
+                "images": "0.045"
+              },
+              "ceiling": {
+                "images": "0.042750000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795515086229,
+          "expiresAt": 1796119886229
+        },
+        {
+          "id": "66b2cf38-0a62-4e48-b109-c7e2668ef52b",
+          "version": "2e8892c7f93baedcf1a758f15b7d840740f38a00f0f273771d87c059d9f4c62f",
+          "scope": {
+            "zdr": false,
+            "model": "flux-2-pro",
+            "region": null,
+            "protocol": "images_edits",
+            "serviceTier": "standard",
+            "pricingVariant": "3mp"
+          },
+          "discount": "35",
+          "tiers": [
+            {
+              "id": "7b888160-0d7d-41a9-933e-e832a095d9e1",
+              "rates": {
+                "images": "0.039000000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "7b888160-0d7d-41a9-933e-e832a095d9e1",
+              "rates": {
+                "images": "0.06"
+              },
+              "ceiling": {
+                "images": "0.057000000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795515086229,
+          "expiresAt": 1796119886229
+        },
+        {
+          "id": "475a4116-64a2-4735-a21f-9a7ec19218f6",
+          "version": "fccf1da9466236600d501bc4b9fc3cb78097ff5c6e26c3def26612ea98c92c87",
+          "scope": {
+            "zdr": false,
+            "model": "flux-2-pro",
+            "region": null,
+            "protocol": "images_edits",
+            "serviceTier": "standard",
+            "pricingVariant": "4mp"
+          },
+          "discount": "35",
+          "tiers": [
+            {
+              "id": "dad7db78-1139-4543-815a-fb19bff0870e",
+              "rates": {
+                "images": "0.048750000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "dad7db78-1139-4543-815a-fb19bff0870e",
+              "rates": {
+                "images": "0.075"
+              },
+              "ceiling": {
+                "images": "0.071250000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795515086229,
+          "expiresAt": 1796119886229
+        },
+        {
+          "id": "c0d714ba-a945-4346-9dec-1c718e7de9e9",
+          "version": "75d3a6d7731f36c3d21ed8bcfc95d8302940b49ec7e1c9a66571e782c6a740e4",
+          "scope": {
+            "zdr": false,
+            "model": "flux-2-pro",
+            "region": null,
+            "protocol": "images_edits",
+            "serviceTier": "standard",
+            "pricingVariant": "default"
+          },
+          "discount": "35",
+          "tiers": [
+            {
+              "id": "a85ed2d9-8ad3-4291-aed3-78c9c3de21d2",
+              "rates": {
+                "images": "0.019500000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "a85ed2d9-8ad3-4291-aed3-78c9c3de21d2",
+              "rates": {
+                "images": "0.03"
+              },
+              "ceiling": {
+                "images": "0.028500000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795515086229,
+          "expiresAt": 1796119886229
+        },
+        {
+          "id": "10f840ed-561b-4fe8-b200-2e763591a098",
+          "version": "72a4fd376ad941b3eca376a7bf2c084315258ada55eb993208de4678cdc7bb7d",
+          "scope": {
+            "zdr": false,
+            "model": "flux-2-pro",
+            "region": null,
+            "protocol": "images_generations",
+            "serviceTier": "standard",
+            "pricingVariant": "1mp"
+          },
+          "discount": "35",
+          "tiers": [
+            {
+              "id": "add5cbc2-bf0f-4dac-aa8a-12a78f728c77",
+              "rates": {
+                "images": "0.019500000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "add5cbc2-bf0f-4dac-aa8a-12a78f728c77",
+              "rates": {
+                "images": "0.03"
+              },
+              "ceiling": {
+                "images": "0.028500000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795515086229,
+          "expiresAt": 1796119886229
+        },
+        {
+          "id": "0b471ee8-3560-481a-8c64-674897aeaaf8",
+          "version": "da1065c812fa4d6c9c72f4ae0a93213ff5d704e50ab96ad8dcefe036e9050e35",
+          "scope": {
+            "zdr": false,
+            "model": "flux-2-pro",
+            "region": null,
+            "protocol": "images_generations",
+            "serviceTier": "standard",
+            "pricingVariant": "2mp"
+          },
+          "discount": "35",
+          "tiers": [
+            {
+              "id": "f7b398d7-36f4-4f1f-8e9d-1fcd784cf29b",
+              "rates": {
+                "images": "0.029250000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "f7b398d7-36f4-4f1f-8e9d-1fcd784cf29b",
+              "rates": {
+                "images": "0.045"
+              },
+              "ceiling": {
+                "images": "0.042750000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795515086229,
+          "expiresAt": 1796119886229
+        },
+        {
+          "id": "7d4a2d78-65e2-4b1a-9e81-8268382a52b5",
+          "version": "b3316f16f3a549392a1408703ade9050a02d733bb7f31d16f6bb40dca8f2e70d",
+          "scope": {
+            "zdr": false,
+            "model": "flux-2-pro",
+            "region": null,
+            "protocol": "images_generations",
+            "serviceTier": "standard",
+            "pricingVariant": "3mp"
+          },
+          "discount": "35",
+          "tiers": [
+            {
+              "id": "7b888160-0d7d-41a9-933e-e832a095d9e1",
+              "rates": {
+                "images": "0.039000000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "7b888160-0d7d-41a9-933e-e832a095d9e1",
+              "rates": {
+                "images": "0.06"
+              },
+              "ceiling": {
+                "images": "0.057000000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795515086229,
+          "expiresAt": 1796119886229
+        },
+        {
+          "id": "6adb11b0-28f5-418b-8ada-3cd3533b4c7e",
+          "version": "f2039692175df5054fcb2ccf773be2c8f1f2330b057b962c4bc1b59569085587",
+          "scope": {
+            "zdr": false,
+            "model": "flux-2-pro",
+            "region": null,
+            "protocol": "images_generations",
+            "serviceTier": "standard",
+            "pricingVariant": "4mp"
+          },
+          "discount": "35",
+          "tiers": [
+            {
+              "id": "dad7db78-1139-4543-815a-fb19bff0870e",
+              "rates": {
+                "images": "0.048750000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "dad7db78-1139-4543-815a-fb19bff0870e",
+              "rates": {
+                "images": "0.075"
+              },
+              "ceiling": {
+                "images": "0.071250000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795515086229,
+          "expiresAt": 1796119886229
+        },
+        {
+          "id": "052496b9-65f3-48aa-9d8e-a62008f114d9",
+          "version": "560da8732327b76694ba758c2c446513dff7883e0c9fe553ff5e8980c778d5b7",
+          "scope": {
+            "zdr": false,
+            "model": "flux-2-pro",
+            "region": null,
+            "protocol": "images_generations",
+            "serviceTier": "standard",
+            "pricingVariant": "default"
+          },
+          "discount": "35",
+          "tiers": [
+            {
+              "id": "a85ed2d9-8ad3-4291-aed3-78c9c3de21d2",
+              "rates": {
+                "images": "0.019500000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "a85ed2d9-8ad3-4291-aed3-78c9c3de21d2",
+              "rates": {
+                "images": "0.03"
+              },
+              "ceiling": {
+                "images": "0.028500000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795515086229,
+          "expiresAt": 1796119886229
+        }
+      ]
+    },
+    {
+      "id": "kling-v3.0-i2v",
+      "context_length": null,
+      "max_output_tokens": null,
+      "aliases": [],
+      "model_type": "video",
+      "endpoint": "/v1/videos/generations",
+      "supported_endpoints": [
+        "/v1/videos/generations"
+      ],
+      "input_per_million": "0.000000",
+      "output_per_million": "0.000000",
+      "cache_read_per_million": "0",
+      "cache_write_per_million": "0",
+      "image_output_per_million": null,
+      "media_input_unit_price": null,
+      "media_unit_price": "0.145600",
+      "media_unit": "second",
+      "media_prices": {
+        "PRO": "0.145600",
+        "PRO+AUDIO": "0.218400",
+        "PRO+AUDIO+VOICE_CONTROL": "0.254800",
+        "STD": "0.109200",
+        "STD+AUDIO": "0.163800",
+        "STD+AUDIO+VOICE_CONTROL": "0.200200"
+      },
+      "image_pricing_unit": "second",
+      "reference_input_per_million": "0.000000",
+      "reference_output_per_million": "0.000000",
+      "reference_cache_read_per_million": null,
+      "reference_cache_write_per_million": null,
+      "reference_image_output_per_million": null,
+      "reference_media_input_unit_price": null,
+      "reference_media_unit_price": "0.168000",
+      "reference_media_prices": {
+        "PRO": "0.224000",
+        "PRO+AUDIO": "0.336000",
+        "PRO+AUDIO+VOICE_CONTROL": "0.392000",
+        "STD": "0.168000",
+        "STD+AUDIO": "0.252000",
+        "STD+AUDIO+VOICE_CONTROL": "0.308000"
+      },
+      "discount_percent": "35.00",
+      "logo_url": "/lobe/kling-avatar.svg",
+      "provider_name": "klingai",
+      "primary_model_id": null,
+      "is_visible": true,
+      "supports_vision": true,
+      "supports_video": false,
+      "supports_reasoning": false,
+      "reasoning_capability_mode": "auto",
+      "supports_streaming": true,
+      "supports_image_edit": false,
+      "features": [
+        "image-input"
+      ],
+      "is_free": false,
+      "available_until": null,
+      "input_token_price_threshold": null,
+      "input_per_million_above_threshold": null,
+      "output_per_million_above_threshold": null,
+      "zero_data_retention": false,
+      "zero_data_retention_route": "none",
+      "default_pricing_scope": {
+        "zdr": false,
+        "model": "kling-v3.0-i2v",
+        "region": null,
+        "protocol": "video_generations",
+        "serviceTier": "standard",
+        "pricingVariant": "pro"
+      },
+      "pricing_scopes": [
+        {
+          "id": "fdfac664-b52b-4700-95ca-39e9c9f025ef",
+          "version": "d78d1f8233623e730e67e4ca9ebe2270938e02facb3c1971dd1541b8b6a40cf9",
+          "scope": {
+            "zdr": false,
+            "model": "kling-v3.0-i2v",
+            "region": null,
+            "protocol": "video_generations",
+            "serviceTier": "standard",
+            "pricingVariant": "pro"
+          },
+          "discount": "35",
+          "tiers": [
+            {
+              "id": "5e645d70-424f-4082-a381-d8617a4e983b",
+              "rates": {
+                "seconds": "0.145600000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "5e645d70-424f-4082-a381-d8617a4e983b",
+              "rates": {
+                "seconds": "0.224"
+              },
+              "ceiling": {
+                "seconds": "0.212800000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795390286279,
+          "expiresAt": 1795995086279
+        },
+        {
+          "id": "6e3e5097-1279-4f7f-94b4-a580443dee17",
+          "version": "1affdc638279d761bd36e37f21f4a430fe20baeea860d2e8500b79a869c5c749",
+          "scope": {
+            "zdr": false,
+            "model": "kling-v3.0-i2v",
+            "region": null,
+            "protocol": "video_generations",
+            "serviceTier": "standard",
+            "pricingVariant": "pro+audio"
+          },
+          "discount": "35",
+          "tiers": [
+            {
+              "id": "2dc98950-a5fd-42cd-92c6-af1c6f9cfc40",
+              "rates": {
+                "seconds": "0.218400000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "2dc98950-a5fd-42cd-92c6-af1c6f9cfc40",
+              "rates": {
+                "seconds": "0.336"
+              },
+              "ceiling": {
+                "seconds": "0.319200000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795390286279,
+          "expiresAt": 1795995086279
+        },
+        {
+          "id": "6fa3a3a3-f9ee-49da-9539-2642e99e1a68",
+          "version": "9bf9dda150d3f55b0c0f9ec2e7daefb342094667acf6e9e90e7afe488a61be43",
+          "scope": {
+            "zdr": false,
+            "model": "kling-v3.0-i2v",
+            "region": null,
+            "protocol": "video_generations",
+            "serviceTier": "standard",
+            "pricingVariant": "pro+audio+voice_control"
+          },
+          "discount": "35",
+          "tiers": [
+            {
+              "id": "8bcabbeb-5b76-4b84-8a4f-67e607ca9f95",
+              "rates": {
+                "seconds": "0.254800000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "8bcabbeb-5b76-4b84-8a4f-67e607ca9f95",
+              "rates": {
+                "seconds": "0.392"
+              },
+              "ceiling": {
+                "seconds": "0.372400000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795390286279,
+          "expiresAt": 1795995086279
+        },
+        {
+          "id": "5cbfbb2e-73cf-486b-80e2-be1926bbe370",
+          "version": "eb393325d7c573d1a246a54cb74ae5d0182326c28c80bb1af40edee4cf325681",
+          "scope": {
+            "zdr": false,
+            "model": "kling-v3.0-i2v",
+            "region": null,
+            "protocol": "video_generations",
+            "serviceTier": "standard",
+            "pricingVariant": "std"
+          },
+          "discount": "35",
+          "tiers": [
+            {
+              "id": "b7db68a4-7851-4bc5-aa1a-99e8a92b51ea",
+              "rates": {
+                "seconds": "0.109200000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "b7db68a4-7851-4bc5-aa1a-99e8a92b51ea",
+              "rates": {
+                "seconds": "0.168"
+              },
+              "ceiling": {
+                "seconds": "0.159600000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795390286279,
+          "expiresAt": 1795995086279
+        },
+        {
+          "id": "9ea6ca07-8019-48aa-a67b-352331465a85",
+          "version": "c3ca04df19ec8bd52f91b1f8bebbfbd15bbb966536b5da04694ddd19dc7c06b2",
+          "scope": {
+            "zdr": false,
+            "model": "kling-v3.0-i2v",
+            "region": null,
+            "protocol": "video_generations",
+            "serviceTier": "standard",
+            "pricingVariant": "std+audio"
+          },
+          "discount": "35",
+          "tiers": [
+            {
+              "id": "44244925-8890-432b-9a9f-39faeaf14fbb",
+              "rates": {
+                "seconds": "0.163800000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "44244925-8890-432b-9a9f-39faeaf14fbb",
+              "rates": {
+                "seconds": "0.252"
+              },
+              "ceiling": {
+                "seconds": "0.239400000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795390286279,
+          "expiresAt": 1795995086279
+        },
+        {
+          "id": "b2ced30b-e1e8-4dbc-83f5-33649de48720",
+          "version": "07654464352611b726ae8296c0913ffa4c3221521e4286c25fa269fad383c925",
+          "scope": {
+            "zdr": false,
+            "model": "kling-v3.0-i2v",
+            "region": null,
+            "protocol": "video_generations",
+            "serviceTier": "standard",
+            "pricingVariant": "std+audio+voice_control"
+          },
+          "discount": "35",
+          "tiers": [
+            {
+              "id": "35931933-89ed-4708-8738-fc716291788e",
+              "rates": {
+                "seconds": "0.200200000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "35931933-89ed-4708-8738-fc716291788e",
+              "rates": {
+                "seconds": "0.308"
+              },
+              "ceiling": {
+                "seconds": "0.292600000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795390286279,
+          "expiresAt": 1795995086279
+        }
+      ]
+    },
+    {
+      "id": "music-v2",
+      "context_length": null,
+      "max_output_tokens": null,
+      "aliases": [],
+      "model_type": "speech",
+      "endpoint": "/v1/audio/speech",
+      "supported_endpoints": [
+        "/v1/audio/speech"
+      ],
+      "input_per_million": "2860.000000",
+      "output_per_million": "0.000000",
+      "cache_read_per_million": "0",
+      "cache_write_per_million": "0",
+      "image_output_per_million": null,
+      "media_input_unit_price": null,
+      "media_unit_price": null,
+      "media_unit": "second",
+      "media_prices": {},
+      "image_pricing_unit": "token",
+      "reference_input_per_million": null,
+      "reference_output_per_million": null,
+      "reference_cache_read_per_million": null,
+      "reference_cache_write_per_million": null,
+      "reference_image_output_per_million": null,
+      "reference_media_input_unit_price": null,
+      "reference_media_unit_price": null,
+      "reference_media_prices": {},
+      "discount_percent": "0.00",
+      "logo_url": null,
+      "provider_name": "elevenlabs",
+      "primary_model_id": null,
+      "is_visible": true,
+      "supports_vision": false,
+      "supports_video": false,
+      "supports_reasoning": false,
+      "reasoning_capability_mode": "auto",
+      "supports_streaming": false,
+      "supports_image_edit": false,
+      "features": [],
+      "is_free": false,
+      "available_until": null,
+      "input_token_price_threshold": null,
+      "input_per_million_above_threshold": null,
+      "output_per_million_above_threshold": null,
+      "zero_data_retention": false,
+      "zero_data_retention_route": "none",
+      "default_pricing_scope": {
+        "zdr": false,
+        "model": "music-v2",
+        "region": null,
+        "protocol": "audio_speech",
+        "serviceTier": "standard",
+        "pricingVariant": "default"
+      },
+      "pricing_scopes": [
+        {
+          "id": "0f442de2-3a78-439e-8f5d-7e5cb2ab83b2",
+          "version": "b11703f5fe80969fd21d314fdefd894dbb3a2b7d82eb29d948680fc00b9872d0",
+          "scope": {
+            "zdr": false,
+            "model": "music-v2",
+            "region": null,
+            "protocol": "audio_speech",
+            "serviceTier": "standard",
+            "pricingVariant": "default"
+          },
+          "discount": "0",
+          "tiers": [
+            {
+              "id": "cost-plus:0",
+              "rates": {
+                "seconds": "0.002860000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [],
+          "effectiveAt": 1794289532980,
+          "expiresAt": 1796104883790
+        }
+      ]
+    },
+    {
+      "id": "seedream-5.0-pro",
+      "context_length": null,
+      "max_output_tokens": null,
+      "aliases": [],
+      "model_type": "image",
+      "endpoint": "/v1/images/generations",
+      "supported_endpoints": [
+        "/v1/images/generations",
+        "/v1/images/edits"
+      ],
+      "input_per_million": "0.000000",
+      "output_per_million": "0.000000",
+      "cache_read_per_million": "0",
+      "cache_write_per_million": "0",
+      "image_output_per_million": null,
+      "media_input_unit_price": null,
+      "media_unit_price": "0.038250",
+      "media_unit": "image",
+      "media_prices": {
+        "OVER_2610000PX": "0.076500"
+      },
+      "image_pricing_unit": "image",
+      "reference_input_per_million": "0.000000",
+      "reference_output_per_million": "0.000000",
+      "reference_cache_read_per_million": null,
+      "reference_cache_write_per_million": null,
+      "reference_image_output_per_million": null,
+      "reference_media_input_unit_price": null,
+      "reference_media_unit_price": "0.090000",
+      "reference_media_prices": {
+        "OVER_2610000PX": "0.090000"
+      },
+      "discount_percent": "15.00",
+      "logo_url": "/lobe/bytedance-avatar.svg",
+      "provider_name": "ByteDance",
+      "primary_model_id": null,
+      "is_visible": true,
+      "supports_vision": false,
+      "supports_video": false,
+      "supports_reasoning": false,
+      "reasoning_capability_mode": "auto",
+      "supports_streaming": false,
+      "supports_image_edit": true,
+      "features": [
+        "image-input",
+        "structured-output",
+        "image-edit"
+      ],
+      "is_free": false,
+      "available_until": null,
+      "input_token_price_threshold": null,
+      "input_per_million_above_threshold": null,
+      "output_per_million_above_threshold": null,
+      "zero_data_retention": false,
+      "zero_data_retention_route": "none",
+      "default_pricing_scope": {
+        "zdr": false,
+        "model": "seedream-5.0-pro",
+        "region": null,
+        "protocol": "images_generations",
+        "serviceTier": "standard",
+        "pricingVariant": "default"
+      },
+      "pricing_scopes": [
+        {
+          "id": "20c55193-c308-4e87-9fec-314e56a2aac4",
+          "version": "5172a84523fc8bb152189ed5c6c72cc54f0c49a70a18bc8145d606eaff34a866",
+          "scope": {
+            "zdr": false,
+            "model": "seedream-5.0-pro",
+            "region": null,
+            "protocol": "images_edits",
+            "serviceTier": "standard",
+            "pricingVariant": "default"
+          },
+          "discount": "15",
+          "tiers": [
+            {
+              "id": "5e772970-5c1e-416c-8ddd-9455440876b3",
+              "rates": {
+                "images": "0.038250000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "5e772970-5c1e-416c-8ddd-9455440876b3",
+              "rates": {
+                "images": "0.045"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795473686604,
+          "expiresAt": 1796078486604
+        },
+        {
+          "id": "b4767679-39fe-496b-bbfc-d885f96d00d5",
+          "version": "413d3ba5731974048bc2aaf69e08f1a55d4100dab0f96708da2b6d8085e31a78",
+          "scope": {
+            "zdr": false,
+            "model": "seedream-5.0-pro",
+            "region": null,
+            "protocol": "images_generations",
+            "serviceTier": "standard",
+            "pricingVariant": "default"
+          },
+          "discount": "15",
+          "tiers": [
+            {
+              "id": "5e772970-5c1e-416c-8ddd-9455440876b3",
+              "rates": {
+                "images": "0.038250000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "5e772970-5c1e-416c-8ddd-9455440876b3",
+              "rates": {
+                "images": "0.045"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795503686305,
+          "expiresAt": 1796108486305
+        },
+        {
+          "id": "2b077419-83b3-46b2-b067-308881aab986",
+          "version": "5bef1c3425f0a804c17e0c9aa28dc53f67ae721925f7497de280e3801f3f6f11",
+          "scope": {
+            "zdr": false,
+            "model": "seedream-5.0-pro",
+            "region": null,
+            "protocol": "images_generations",
+            "serviceTier": "standard",
+            "pricingVariant": "over_2610000px"
+          },
+          "discount": "15",
+          "tiers": [
+            {
+              "id": "01c2c033-8ff3-4302-8d4b-6a17cbaa56cb",
+              "rates": {
+                "images": "0.076500000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "01c2c033-8ff3-4302-8d4b-6a17cbaa56cb",
+              "rates": {
+                "images": "0.09"
+              },
+              "ceiling": {
+                "images": "0.085500000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795503686305,
+          "expiresAt": 1796108486305
+        }
+      ]
+    },
+    {
+      "id": "sound-effects-v2",
+      "context_length": null,
+      "max_output_tokens": null,
+      "aliases": [],
+      "model_type": "speech",
+      "endpoint": "/v1/audio/speech",
+      "supported_endpoints": [
+        "/v1/audio/speech"
+      ],
+      "input_per_million": "2288.000000",
+      "output_per_million": "0.000000",
+      "cache_read_per_million": "0",
+      "cache_write_per_million": "0",
+      "image_output_per_million": null,
+      "media_input_unit_price": null,
+      "media_unit_price": null,
+      "media_unit": "second",
+      "media_prices": {},
+      "image_pricing_unit": "token",
+      "reference_input_per_million": null,
+      "reference_output_per_million": null,
+      "reference_cache_read_per_million": null,
+      "reference_cache_write_per_million": null,
+      "reference_image_output_per_million": null,
+      "reference_media_input_unit_price": null,
+      "reference_media_unit_price": null,
+      "reference_media_prices": {},
+      "discount_percent": "0.00",
+      "logo_url": null,
+      "provider_name": "elevenlabs",
+      "primary_model_id": null,
+      "is_visible": true,
+      "supports_vision": false,
+      "supports_video": false,
+      "supports_reasoning": false,
+      "reasoning_capability_mode": "auto",
+      "supports_streaming": false,
+      "supports_image_edit": false,
+      "features": [],
+      "is_free": false,
+      "available_until": null,
+      "input_token_price_threshold": null,
+      "input_per_million_above_threshold": null,
+      "output_per_million_above_threshold": null,
+      "zero_data_retention": false,
+      "zero_data_retention_route": "none",
+      "default_pricing_scope": {
+        "zdr": false,
+        "model": "sound-effects-v2",
+        "region": null,
+        "protocol": "audio_speech",
+        "serviceTier": "standard",
+        "pricingVariant": "default"
+      },
+      "pricing_scopes": [
+        {
+          "id": "ead6d391-85a0-46eb-8397-db8a6b4086ed",
+          "version": "3510a6eceeff7e2f6106a1c03f4df8aefdc10651936f1e3317a8246efae21626",
+          "scope": {
+            "zdr": false,
+            "model": "sound-effects-v2",
+            "region": null,
+            "protocol": "audio_speech",
+            "serviceTier": "standard",
+            "pricingVariant": "default"
+          },
+          "discount": "0",
+          "tiers": [
+            {
+              "id": "cost-plus:0",
+              "rates": {
+                "seconds": "0.002288000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [],
+          "effectiveAt": 1794289545073,
+          "expiresAt": 1796104892519
+        }
+      ]
+    },
+    {
+      "id": "tts-1",
+      "context_length": null,
+      "max_output_tokens": null,
+      "aliases": [
+        "openai/tts-1"
+      ],
+      "model_type": "speech",
+      "endpoint": "/v1/audio/speech",
+      "supported_endpoints": [
+        "/v1/audio/speech"
+      ],
+      "input_per_million": "9.750000",
+      "output_per_million": "0.000000",
+      "cache_read_per_million": "0",
+      "cache_write_per_million": "0",
+      "image_output_per_million": null,
+      "media_input_unit_price": null,
+      "media_unit_price": null,
+      "media_unit": null,
+      "media_prices": {},
+      "image_pricing_unit": "token",
+      "reference_input_per_million": "15.000000",
+      "reference_output_per_million": "0.000000",
+      "reference_cache_read_per_million": null,
+      "reference_cache_write_per_million": null,
+      "reference_image_output_per_million": null,
+      "reference_media_input_unit_price": null,
+      "reference_media_unit_price": null,
+      "reference_media_prices": {},
+      "discount_percent": "35.00",
+      "logo_url": "/lobe/openai-avatar.svg",
+      "provider_name": "OpenAI",
+      "primary_model_id": null,
+      "is_visible": true,
+      "supports_vision": false,
+      "supports_video": false,
+      "supports_reasoning": false,
+      "reasoning_capability_mode": "auto",
+      "supports_streaming": false,
+      "supports_image_edit": false,
+      "features": [],
+      "is_free": false,
+      "available_until": null,
+      "input_token_price_threshold": null,
+      "input_per_million_above_threshold": null,
+      "output_per_million_above_threshold": null,
+      "zero_data_retention": false,
+      "zero_data_retention_route": "none",
+      "default_pricing_scope": {
+        "zdr": false,
+        "model": "tts-1",
+        "region": null,
+        "protocol": "audio_speech",
+        "serviceTier": "standard",
+        "pricingVariant": "default"
+      },
+      "pricing_scopes": [
+        {
+          "id": "5303a316-68e7-412e-93a9-f6d25e1601d3",
+          "version": "62463250812d9d3ff5c98b9f52ffcdd25b0c7254dae6e6aaca7f977107ed227c",
+          "scope": {
+            "zdr": false,
+            "model": "tts-1",
+            "region": null,
+            "protocol": "audio_speech",
+            "serviceTier": "standard",
+            "pricingVariant": "default"
+          },
+          "discount": "35",
+          "tiers": [
+            {
+              "id": "24fd3a38-9c02-4033-bd55-61ead122fa12",
+              "rates": {
+                "characters": "0.000009750000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "24fd3a38-9c02-4033-bd55-61ead122fa12",
+              "rates": {
+                "characters": "0.000015"
+              },
+              "ceiling": {
+                "characters": "0.000014250000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795522286252,
+          "expiresAt": 1796127086252
+        }
+      ]
+    },
+    {
+      "id": "veo-3.1-generate-001",
+      "context_length": null,
+      "max_output_tokens": null,
+      "aliases": [
+        "google/veo-3.1-generate-001"
+      ],
+      "model_type": "video",
+      "endpoint": "/v1/videos/generations",
+      "supported_endpoints": [
+        "/v1/videos/generations"
+      ],
+      "input_per_million": "0.000000",
+      "output_per_million": "0.000000",
+      "cache_read_per_million": "0",
+      "cache_write_per_million": "0",
+      "image_output_per_million": null,
+      "media_input_unit_price": null,
+      "media_unit_price": "0.130000",
+      "media_unit": "second",
+      "media_prices": {
+        "1080P": "0.130000",
+        "1080P+AUDIO": "0.260000",
+        "4K": "0.260000",
+        "4K+AUDIO": "0.390000",
+        "720P": "0.130000",
+        "720P+AUDIO": "0.260000"
+      },
+      "image_pricing_unit": "second",
+      "reference_input_per_million": "0.000000",
+      "reference_output_per_million": "0.000000",
+      "reference_cache_read_per_million": null,
+      "reference_cache_write_per_million": null,
+      "reference_image_output_per_million": null,
+      "reference_media_input_unit_price": null,
+      "reference_media_unit_price": "0.200000",
+      "reference_media_prices": {
+        "1080P": "0.200000",
+        "1080P+AUDIO": "0.400000",
+        "4K": "0.400000",
+        "4K+AUDIO": "0.600000",
+        "720P": "0.200000",
+        "720P+AUDIO": "0.400000"
+      },
+      "discount_percent": "35.00",
+      "logo_url": "/lobe/google-avatar.svg",
+      "provider_name": "Google",
+      "primary_model_id": null,
+      "is_visible": true,
+      "supports_vision": true,
+      "supports_video": false,
+      "supports_reasoning": false,
+      "reasoning_capability_mode": "auto",
+      "supports_streaming": true,
+      "supports_image_edit": false,
+      "features": [
+        "image-input"
+      ],
+      "is_free": false,
+      "available_until": null,
+      "input_token_price_threshold": null,
+      "input_per_million_above_threshold": null,
+      "output_per_million_above_threshold": null,
+      "zero_data_retention": false,
+      "zero_data_retention_route": "none",
+      "default_pricing_scope": {
+        "zdr": false,
+        "model": "veo-3.1-generate-001",
+        "region": null,
+        "protocol": "video_generations",
+        "serviceTier": "standard",
+        "pricingVariant": "1080p"
+      },
+      "pricing_scopes": [
+        {
+          "id": "ac937273-6024-407c-9b80-e2c3971e372e",
+          "version": "8a3520d606674acb6c4a3a03b4a65f55c7af331c646ef7bfae467e8cc5751e72",
+          "scope": {
+            "zdr": false,
+            "model": "veo-3.1-generate-001",
+            "region": null,
+            "protocol": "video_generations",
+            "serviceTier": "standard",
+            "pricingVariant": "1080p"
+          },
+          "discount": "35",
+          "tiers": [
+            {
+              "id": "b538e240-859d-493d-b01e-e86b4ee5a7cb",
+              "rates": {
+                "seconds": "0.130000000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "b538e240-859d-493d-b01e-e86b4ee5a7cb",
+              "rates": {
+                "seconds": "0.2"
+              },
+              "ceiling": {
+                "seconds": "0.190000000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795189886225,
+          "expiresAt": 1795908086251
+        },
+        {
+          "id": "8cb46d92-4c0d-4d80-ad83-60bb021e5c75",
+          "version": "00bda83668ef8c485ab2852a8d654dd57290e6d99f1253c59344cff72a6c29e9",
+          "scope": {
+            "zdr": false,
+            "model": "veo-3.1-generate-001",
+            "region": null,
+            "protocol": "video_generations",
+            "serviceTier": "standard",
+            "pricingVariant": "1080p+audio"
+          },
+          "discount": "35",
+          "tiers": [
+            {
+              "id": "2c6a637b-36c2-48a5-8ebd-9b3bd52ed57d",
+              "rates": {
+                "seconds": "0.260000000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "2c6a637b-36c2-48a5-8ebd-9b3bd52ed57d",
+              "rates": {
+                "seconds": "0.4"
+              },
+              "ceiling": {
+                "seconds": "0.380000000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795189886225,
+          "expiresAt": 1795908086251
+        },
+        {
+          "id": "93bd68d4-b4d0-47a5-ba68-4ebac21587ee",
+          "version": "f79c28cc25e221c975615dc8af0500fa159086b03f7bede945483ab209c5a205",
+          "scope": {
+            "zdr": false,
+            "model": "veo-3.1-generate-001",
+            "region": null,
+            "protocol": "video_generations",
+            "serviceTier": "standard",
+            "pricingVariant": "4k"
+          },
+          "discount": "35",
+          "tiers": [
+            {
+              "id": "bc7466d0-d479-4ecb-a33e-b8172169e03c",
+              "rates": {
+                "seconds": "0.260000000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "bc7466d0-d479-4ecb-a33e-b8172169e03c",
+              "rates": {
+                "seconds": "0.4"
+              },
+              "ceiling": {
+                "seconds": "0.380000000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795189886225,
+          "expiresAt": 1795908086251
+        },
+        {
+          "id": "3f914472-2d02-4430-989e-f47c4d9bcbce",
+          "version": "729bdbf4a2b13d8c94c33729b0a8aaa994f3bda15295c6c1f8a99e07702c3a42",
+          "scope": {
+            "zdr": false,
+            "model": "veo-3.1-generate-001",
+            "region": null,
+            "protocol": "video_generations",
+            "serviceTier": "standard",
+            "pricingVariant": "4k+audio"
+          },
+          "discount": "35",
+          "tiers": [
+            {
+              "id": "2ac166ef-51a0-486c-8d8d-21ba5eaf88cc",
+              "rates": {
+                "seconds": "0.390000000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "2ac166ef-51a0-486c-8d8d-21ba5eaf88cc",
+              "rates": {
+                "seconds": "0.6"
+              },
+              "ceiling": {
+                "seconds": "0.570000000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795189886225,
+          "expiresAt": 1795908086251
+        },
+        {
+          "id": "67bf6601-6eb4-429b-bddc-a6a8709c7c8b",
+          "version": "53f872d23f5494fc5929f99e9f5529c1fcb0b9ce8d09a0fe6ef2e531300ebd0c",
+          "scope": {
+            "zdr": false,
+            "model": "veo-3.1-generate-001",
+            "region": null,
+            "protocol": "video_generations",
+            "serviceTier": "standard",
+            "pricingVariant": "720p"
+          },
+          "discount": "35",
+          "tiers": [
+            {
+              "id": "586e64be-c521-4eb6-9988-ca7f9baa985e",
+              "rates": {
+                "seconds": "0.130000000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "586e64be-c521-4eb6-9988-ca7f9baa985e",
+              "rates": {
+                "seconds": "0.2"
+              },
+              "ceiling": {
+                "seconds": "0.190000000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795189886225,
+          "expiresAt": 1795908086251
+        },
+        {
+          "id": "29e43e9c-eb3d-49b5-af63-4e830ecdc80e",
+          "version": "104e8218a1c6c2276e842b2db6df986bcb3f4ca1780b20e6bed01e6fc790286e",
+          "scope": {
+            "zdr": false,
+            "model": "veo-3.1-generate-001",
+            "region": null,
+            "protocol": "video_generations",
+            "serviceTier": "standard",
+            "pricingVariant": "720p+audio"
+          },
+          "discount": "35",
+          "tiers": [
+            {
+              "id": "0b8cfc46-3eb7-42e0-be61-a052c8a4fedc",
+              "rates": {
+                "seconds": "0.260000000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "0b8cfc46-3eb7-42e0-be61-a052c8a4fedc",
+              "rates": {
+                "seconds": "0.4"
+              },
+              "ceiling": {
+                "seconds": "0.380000000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795189886225,
+          "expiresAt": 1795908086251
+        }
+      ]
+    },
+    {
+      "id": "wan-v2.7-r2v",
+      "context_length": null,
+      "max_output_tokens": null,
+      "aliases": [],
+      "model_type": "video",
+      "endpoint": "/v1/videos/generations",
+      "supported_endpoints": [
+        "/v1/videos/generations"
+      ],
+      "input_per_million": "0.000000",
+      "output_per_million": "0.000000",
+      "cache_read_per_million": "0",
+      "cache_write_per_million": "0",
+      "image_output_per_million": null,
+      "media_input_unit_price": null,
+      "media_unit_price": "0.113000",
+      "media_unit": "second",
+      "media_prices": {
+        "1080P": "0.113000",
+        "720P": "0.075333"
+      },
+      "image_pricing_unit": "second",
+      "reference_input_per_million": "0.000000",
+      "reference_output_per_million": "0.000000",
+      "reference_cache_read_per_million": null,
+      "reference_cache_write_per_million": null,
+      "reference_image_output_per_million": null,
+      "reference_media_input_unit_price": null,
+      "reference_media_unit_price": "0.100000",
+      "reference_media_prices": {
+        "1080P": "0.150000",
+        "720P": "0.100000"
+      },
+      "discount_percent": "24.67",
+      "logo_url": "/lobe/wan-avatar.svg",
+      "provider_name": "alibaba",
+      "primary_model_id": null,
+      "is_visible": true,
+      "supports_vision": true,
+      "supports_video": true,
+      "supports_reasoning": false,
+      "reasoning_capability_mode": "auto",
+      "supports_streaming": true,
+      "supports_image_edit": false,
+      "features": [
+        "image-input",
+        "video-input"
+      ],
+      "is_free": false,
+      "available_until": null,
+      "input_token_price_threshold": null,
+      "input_per_million_above_threshold": null,
+      "output_per_million_above_threshold": null,
+      "zero_data_retention": false,
+      "zero_data_retention_route": "none",
+      "default_pricing_scope": {
+        "zdr": false,
+        "model": "wan-v2.7-r2v",
+        "region": null,
+        "protocol": "video_generations",
+        "serviceTier": "standard",
+        "pricingVariant": "1080p"
+      },
+      "pricing_scopes": [
+        {
+          "id": "18f18cca-5139-44f9-9346-61d1896952f4",
+          "version": "242ef80edafbcd23aa7de9931b6c9b8c845d41d96bda86f202aca1c3c43dcd0f",
+          "scope": {
+            "zdr": false,
+            "model": "wan-v2.7-r2v",
+            "region": null,
+            "protocol": "video_generations",
+            "serviceTier": "standard",
+            "pricingVariant": "1080p"
+          },
+          "discount": "24.666666666666666666666700",
+          "tiers": [
+            {
+              "id": "134e9eb6-3f5c-407e-92cc-598e7dbd304d",
+              "rates": {
+                "seconds": "0.112999999999999999999999"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "134e9eb6-3f5c-407e-92cc-598e7dbd304d",
+              "rates": {
+                "seconds": "0.15"
+              },
+              "ceiling": {
+                "seconds": "0.142500000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795502938027,
+          "expiresAt": 1796107738027
+        },
+        {
+          "id": "a27aa7bf-fea8-4bbc-8ff0-478b7e7920a3",
+          "version": "e59de0c0abb6e005f5d324386d5b4faa5408b6e0b70e5f1e5fc6196d32213817",
+          "scope": {
+            "zdr": false,
+            "model": "wan-v2.7-r2v",
+            "region": null,
+            "protocol": "video_generations",
+            "serviceTier": "standard",
+            "pricingVariant": "720p"
+          },
+          "discount": "24.666666666666666666666700",
+          "tiers": [
+            {
+              "id": "538a3ee1-2acb-4ae4-b3bd-59602da1eba7",
+              "rates": {
+                "seconds": "0.075333333333333333333333"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "538a3ee1-2acb-4ae4-b3bd-59602da1eba7",
+              "rates": {
+                "seconds": "0.1"
+              },
+              "ceiling": {
+                "seconds": "0.095000000000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795502938027,
+          "expiresAt": 1796107738027
+        }
+      ]
+    },
+    {
+      "id": "gpt-image-2",
+      "context_length": 128000,
+      "max_output_tokens": 65536,
+      "aliases": [
+        "openai/gpt-image-2"
+      ],
+      "model_type": "image",
+      "endpoint": "/v1/images/generations",
+      "supported_endpoints": [
+        "/v1/images/generations",
+        "/v1/images/edits"
+      ],
+      "input_per_million": "4.250000",
+      "output_per_million": "25.500000",
+      "cache_read_per_million": "1.062500000000000000000000",
+      "cache_write_per_million": "4.250000000000000000000000",
+      "image_output_per_million": "25.500000",
+      "media_input_unit_price": null,
+      "media_unit_price": null,
+      "media_unit": null,
+      "media_prices": {},
+      "image_pricing_unit": "token",
+      "reference_input_per_million": "5.000000",
+      "reference_output_per_million": "30.000000",
+      "reference_cache_read_per_million": "1.250000",
+      "reference_cache_write_per_million": null,
+      "reference_image_output_per_million": "30.000000",
+      "reference_media_input_unit_price": null,
+      "reference_media_unit_price": null,
+      "reference_media_prices": {},
+      "discount_percent": "15.00",
+      "logo_url": null,
+      "provider_name": "OpenAI",
+      "primary_model_id": null,
+      "is_visible": true,
+      "supports_vision": true,
+      "supports_video": false,
+      "supports_reasoning": false,
+      "reasoning_capability_mode": "auto",
+      "supports_streaming": false,
+      "supports_image_edit": true,
+      "features": [
+        "image-input",
+        "audio-input",
+        "video-input",
+        "implicit-caching",
+        "image-edit",
+        "context-128k"
+      ],
+      "is_free": false,
+      "available_until": null,
+      "input_token_price_threshold": null,
+      "input_per_million_above_threshold": null,
+      "output_per_million_above_threshold": null,
+      "zero_data_retention": false,
+      "zero_data_retention_route": "none",
+      "default_pricing_scope": {
+        "zdr": false,
+        "model": "gpt-image-2",
+        "region": null,
+        "protocol": "images_generations",
+        "serviceTier": "standard",
+        "pricingVariant": "default"
+      },
+      "pricing_scopes": [
+        {
+          "id": "6b24bd83-abda-40a2-a559-a16bb23ca702",
+          "version": "7cd9df0b761c82c8de9faebc19bacdc3b3bef5ea0a82b32fb9015455532b3d38",
+          "scope": {
+            "zdr": false,
+            "model": "gpt-image-2",
+            "region": null,
+            "protocol": "images_edits",
+            "serviceTier": "standard",
+            "pricingVariant": "default"
+          },
+          "discount": "15",
+          "tiers": [
+            {
+              "id": "69810a84-f6ec-4823-8575-81da61bee57b",
+              "rates": {
+                "input_tokens": "0.000004250000000000000000",
+                "output_tokens": "0.000025500000000000000000",
+                "cache_read_tokens": "0.000001062500000000000000",
+                "image_input_tokens": "0.000006800000000000000000",
+                "image_output_tokens": "0.000025500000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "69810a84-f6ec-4823-8575-81da61bee57b",
+              "rates": {
+                "input_tokens": "0.000005000000000000000000",
+                "output_tokens": "0.000030000000000000000000",
+                "cache_read_tokens": "0.000001250000000000000000",
+                "image_input_tokens": "0.000008",
+                "image_output_tokens": "0.000030000000000000000000"
+              },
+              "ceiling": {
+                "input_tokens": "0.000004750000000000000000",
+                "output_tokens": "0.000028500000000000000000",
+                "cache_read_tokens": "0.000001187500000000000000",
+                "image_input_tokens": "0.000007600000000000000000",
+                "image_output_tokens": "0.000028500000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795532486311,
+          "expiresAt": 1796137286311
+        },
+        {
+          "id": "137dfa8e-ba87-4d6f-99ff-6362c6c914b4",
+          "version": "000f0200cef01c15c22d99913daf08f17f60ea68b8b4a1b572e4b052fda0d4ea",
+          "scope": {
+            "zdr": false,
+            "model": "gpt-image-2",
+            "region": null,
+            "protocol": "images_generations",
+            "serviceTier": "standard",
+            "pricingVariant": "default"
+          },
+          "discount": "15",
+          "tiers": [
+            {
+              "id": "69810a84-f6ec-4823-8575-81da61bee57b",
+              "rates": {
+                "input_tokens": "0.000004250000000000000000",
+                "output_tokens": "0.000025500000000000000000",
+                "cache_read_tokens": "0.000001062500000000000000",
+                "image_input_tokens": "0.000006800000000000000000",
+                "image_output_tokens": "0.000025500000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "makerTiers": [
+            {
+              "id": "69810a84-f6ec-4823-8575-81da61bee57b",
+              "rates": {
+                "input_tokens": "0.000005000000000000000000",
+                "output_tokens": "0.000030000000000000000000",
+                "cache_read_tokens": "0.000001250000000000000000",
+                "image_input_tokens": "0.000008",
+                "image_output_tokens": "0.000030000000000000000000"
+              },
+              "ceiling": {
+                "input_tokens": "0.000004750000000000000000",
+                "output_tokens": "0.000028500000000000000000",
+                "cache_read_tokens": "0.000001187500000000000000",
+                "image_input_tokens": "0.000007600000000000000000",
+                "image_output_tokens": "0.000028500000000000000000"
+              },
+              "maxContext": null,
+              "minContext": 0
+            }
+          ],
+          "effectiveAt": 1795532486311,
+          "expiresAt": 1796137286311
+        }
+      ]
+    }
+  ]
+}
