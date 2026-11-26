@@ -1,0 +1,99 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "flux-2-flex",
+      "object": "model",
+      "type": "image",
+      "provider": "Black Forest Labs",
+      "owned_by": "black-forest-labs",
+      "endpoint": "/v1/images/generations",
+      "supported_endpoints": [
+        "/v1/images/generations"
+      ],
+      "features": [
+        "structured-output",
+        "image-edit"
+      ],
+      "capabilities": {
+        "image_generation": true,
+        "image_edit": true,
+        "vision": false
+      },
+      "pricing": {
+        "currency": "USD",
+        "media_unit": "image",
+        "media_unit_price": "0.051035",
+        "resolution_prices": {},
+        "discount_percent": "0.00"
+      }
+    },
+    {
+      "id": "grok-imagine-video",
+      "object": "model",
+      "type": "video",
+      "provider": "xAI",
+      "endpoint": "/v1/videos/generations",
+      "supported_endpoints": [
+        "/v1/videos/generations"
+      ],
+      "capabilities": {
+        "image_generation": true,
+        "image_edit": false,
+        "vision": true,
+        "video": false
+      },
+      "features": [
+        "image-input"
+      ],
+      "pricing": {
+        "currency": "USD",
+        "media_unit": "second",
+        "media_unit_price": "0.035000",
+        "resolution_prices": {
+          "480P": "0.035000",
+          "720P": "0.049000"
+        },
+        "discount_percent": "30.00"
+      }
+    },
+    {
+      "id": "drama-3",
+      "object": "model",
+      "type": "speech",
+      "provider": "Fish Audio",
+      "endpoint": "/v1/audio/speech",
+      "supported_endpoints": [
+        "/v1/audio/speech"
+      ],
+      "capabilities": {
+        "image_generation": false,
+        "image_edit": false,
+        "vision": false
+      },
+      "features": [],
+      "pricing": {
+        "currency": "USD",
+        "media_unit": null,
+        "media_unit_price": null,
+        "resolution_prices": {},
+        "discount_percent": "15.00",
+        "scopes": [
+          {
+            "scope": {
+              "protocol": "audio_speech",
+              "pricingVariant": "default"
+            },
+            "tiers": [
+              {
+                "rates": {
+                  "characters": "0.000008500000000000000000"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

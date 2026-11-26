@@ -21,6 +21,9 @@ pub enum JobStatus {
 pub struct HistoryRecord {
     /// Локальный идентификатор записи (UUID).
     pub id: String,
+    /// Сервис, принявший запрос. Прежние записи Rust-студии созданы через CI.
+    #[serde(default)]
+    pub provider: crate::Provider,
     /// Момент создания, Unix-время в секундах.
     pub created_at: i64,
     /// Момент последнего обновления, Unix-время в секундах.

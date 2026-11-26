@@ -57,12 +57,14 @@ pub struct ImageResponse {
     pub billing: Option<Billing>,
 }
 
-/// Элемент ответа videos: ссылка на готовый файл.
+/// Элемент ответа videos: подписанная ссылка или готовый MP4 в base64.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct VideoItem {
     /// URL видео.
     #[serde(default)]
     pub url: Option<String>,
+    #[serde(default)]
+    pub b64_video: Option<String>,
     /// MIME-тип видео, если CI его присылает.
     #[serde(default)]
     pub content_type: Option<String>,
@@ -139,6 +141,10 @@ pub struct AccountBalance {
 /// Собирается из бинарного тела HTTP-ответа, а не из JSON.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct AudioOutput {
+    /// Идентификатор оплаченного запроса из заголовка CI. Старые записи могли
+    /// содержать только бинарный файл и его стоимость.
+    #[serde(default)]
+    pub request_id: Option<String>,
     /// Сырые байты аудио.
     pub bytes: Vec<u8>,
     /// MIME-тип из заголовка Content-Type.

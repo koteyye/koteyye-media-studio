@@ -151,6 +151,23 @@ pub fn format_date_at(unix_secs: i64, now_secs: i64, lang: Lang) -> String {
     }
 }
 
+/// Относительная календарная дата в часовом поясе пользователя. Смещения в
+/// минутах следуют Date.getTimezoneOffset (UTC минус местное время) и могут
+/// различаться для даты записи и сегодняшнего дня.
+pub fn format_local_date_at(
+    unix_secs: i64,
+    now_secs: i64,
+    record_offset: i32,
+    now_offset: i32,
+    lang: Lang,
+) -> String {
+    format_date_at(
+        unix_secs.saturating_sub(i64::from(record_offset) * 60),
+        now_secs.saturating_sub(i64::from(now_offset) * 60),
+        lang,
+    )
+}
+
 /// Гражданская дата (год, месяц 1–12, день 1–31) из дней от Unix-эпохи.
 ///
 /// Алгоритм Howard Hinnant (`civil_from_days`): чистая арифметика

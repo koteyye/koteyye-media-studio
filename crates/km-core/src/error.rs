@@ -18,6 +18,16 @@ pub enum CoreError {
     /// 403 на account-эндпоинтах: у ключа нет scope `account:read`.
     #[error("ключ не имеет доступа к account-эндпоинтам (нужен scope account:read)")]
     ScopeMissing,
+    /// CI прислал квитанцию об успешном POST, но результат не удалось прочитать.
+    #[error("ответ на запрос {request_id} не удалось обработать: {source}")]
+    Receipt {
+        /// Идентификатор для повторного получения результата.
+        request_id: String,
+        /// Сумма списания, если CI уже сообщил её.
+        cost_usd: Option<f64>,
+        /// Причина ошибки чтения или разбора ответа.
+        source: Box<CoreError>,
+    },
     /// API-ключ Cheaper Inference не задан.
     #[error("не задан API-ключ Cheaper Inference")]
     NoKey,

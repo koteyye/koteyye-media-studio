@@ -11,15 +11,40 @@
 use std::collections::HashMap;
 
 use dioxus::prelude::*;
+use futures_channel::oneshot;
 use km_shared::{
-    AppEvent, BalanceView, CatalogModel, HistoryFilter, HistoryRecord, Lang, MediaKind, Settings,
-    Theme,
+    AppEvent, BalanceView, CatalogModel, GenMode, GenerationRequest, HistoryFilter, HistoryRecord,
+    Lang, MediaKind, ModelChoice, Provider, Settings, Theme,
 };
 use km_ui_core::i18n::tr;
+use km_ui_core::studio::build_request;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::ipc;
+use km_ui_core::studio_results::Submission;
+mod drafts;
+pub(crate) use drafts::StudioDraft;
+use drafts::StudioSection;
+pub(crate) mod updates;
+mod workspace;
+use updates::UpdatePhase;
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum BalanceState {
+    Loading,
+    Ready(BalanceView),
+    Failed(String),
+}
+
+impl BalanceState {
+    pub(crate) fn for_provider(&self, provider: Provider) -> Option<&BalanceView> {
+        match self {
+            Self::Ready(view) if view.provider == provider => Some(view),
+            _ => None,
+        }
+    }
+}
 
 /// Глобальное состояние: сигналы, общие для всех экранов.
 ///
@@ -39,16 +64,32 @@ pub struct AppState {
     pub models_by_kind: Signal<HashMap<MediaKind, Vec<CatalogModel>>>,
     /// История генераций, новые первыми; обновляется по событиям ядра.
     pub history: Signal<Vec<HistoryRecord>>,
-    /// Баланс; `None`, пока не загружен.
-    pub balance: Signal<Option<BalanceView>>,
+    /// Расход и кошелёк выбранного провайдера.
+    pub(crate) balance: Signal<BalanceState>,
     /// Глобальная загрузка (инициализация приложения).
     pub busy: Signal<bool>,
-    /// Последняя ошибка IPC для баннера в интерфейсе.
-    ///
-    /// Семантика «последняя операция»: успешная IPC-операция очищает сигнал
-    /// (`None`), отказ — записывает причину. Баннер также закрывается вручную
-    /// (кнопка в [`crate::components::layout::Layout`]).
+    /// Ошибка действия пользователя. Фоновая синхронизация её не сбрасывает.
     pub error: Signal<Option<String>>,
+    /// Ошибка фоновой загрузки настроек, каталога, истории или баланса.
+    pub background_error: Signal<Option<String>>,
+    /// Вызовы generate в полёте. Разные виды медиа работают независимо.
+    pub(crate) generating: Signal<HashMap<MediaKind, GenMode>>,
+    /// Ручная проверка Pending работает отдельно от активных generate.
+    pub(crate) recovering: Signal<bool>,
+    pub(crate) update: Signal<UpdatePhase>,
+    studio: [StudioSection; 3],
+    selected_records: Signal<HashMap<(Provider, MediaKind), String>>,
+    pub(crate) history_filter: Signal<HistoryFilter>,
+    pub(crate) history_focus: Signal<bool>,
+    pub(crate) settings_ready: Signal<bool>,
+    observed_choices: Signal<Option<HashMap<GenMode, ModelChoice>>>,
+    write_tail: CopyValue<Option<oneshot::Receiver<()>>>,
+    provider_changes: Signal<usize>,
+    committed_provider: Signal<Provider>,
+    /// Поздний ответ list_history не должен вернуть уже удалённую запись.
+    history_revision: Signal<u64>,
+    credential_revision: Signal<u64>,
+    balance_revision: Signal<u64>,
     /// Первый запуск: стартовая проверка не нашла ключа ([`needs_onboarding`]).
     /// Выставляется один раз в [`AppState::init`]/`load`; редирект в онбординг
     /// принимает решение по этому сигналу (см. [`crate::app`]).
@@ -76,20 +117,38 @@ impl AppState {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            settings: Signal::new(Settings {
-                local_folder: String::new(),
-                lang: Lang::Ru,
-                theme: Theme::System,
-                show_real_balance: false,
-            }),
+            settings: Signal::new(Settings::default()),
             lang: Signal::new(Lang::Ru),
-            theme: Signal::new(Theme::System),
+            theme: Signal::new(Theme::Light),
+            selected_records: Signal::new(HashMap::new()),
+            history_filter: Signal::new(HistoryFilter::default()),
+            history_focus: Signal::new(false),
+            settings_ready: Signal::new(false),
+            observed_choices: Signal::new(None),
+            write_tail: CopyValue::new(None),
+            provider_changes: Signal::new(0),
+            committed_provider: Signal::new(Provider::default()),
             system_dark: Signal::new(false),
             models_by_kind: Signal::new(HashMap::new()),
             history: Signal::new(Vec::new()),
-            balance: Signal::new(None),
+            balance: Signal::new(BalanceState::Loading),
             busy: Signal::new(true),
             error: Signal::new(None),
+            background_error: Signal::new(None),
+            generating: Signal::new(HashMap::new()),
+            recovering: Signal::new(false),
+            update: Signal::new(UpdatePhase::Idle),
+            studio: [
+                StudioSection::new(GenMode::TextToImage, &[GenMode::ImageEdit]),
+                StudioSection::new(
+                    GenMode::TextToVideo,
+                    &[GenMode::ImageToVideo, GenMode::ReferenceToVideo],
+                ),
+                StudioSection::new(GenMode::Speech, &[GenMode::Music, GenMode::SoundEffects]),
+            ],
+            history_revision: Signal::new(0),
+            credential_revision: Signal::new(0),
+            balance_revision: Signal::new(0),
             onboarding_needed: Signal::new(false),
             onboarding_done: Signal::new(false),
             persist_gen: Signal::new(0),
@@ -114,8 +173,113 @@ impl AppState {
         self.error.set(error);
     }
 
+    pub fn dismiss_error(mut self) {
+        if self.error.peek().is_some() {
+            self.error.set(None);
+        } else {
+            self.background_error.set(None);
+        }
+    }
+
+    pub(crate) fn studio(self, kind: MediaKind) -> StudioSection {
+        match kind {
+            MediaKind::Image => self.studio[0],
+            MediaKind::Video => self.studio[1],
+            MediaKind::Audio => self.studio[2],
+        }
+    }
+
+    /// Восстанавливает форму для редактирования. Отправка всегда явная.
+    pub(crate) fn repeat_record(self, record: &HistoryRecord) -> Result<(), String> {
+        if record.provider == self.settings.peek().provider
+            && record.provider == Provider::CheaperInference
+            && let Some(request) = request_from_history(record)
+            && self.studio(record.kind).restore(request)
+        {
+            self.select_result(record.kind, Some(record.id.clone()));
+            return Ok(());
+        }
+        Err(tr(*self.lang.peek(), "studio.restore_error").to_owned())
+    }
+
+    /// Захватываем вид до spawn: даже два быстрых клика дают один платный вызов.
+    /// Задача привязана к жизни приложения и переживает смену экрана.
+    pub(crate) fn submit(mut self, req: GenerationRequest) {
+        let kind = req.kind;
+        let provider = self.settings.peek().provider;
+        if provider != Provider::CheaperInference
+            || self.media_locked()
+            || self.generating.peek().contains_key(&kind)
+        {
+            return;
+        }
+        self.generating.write().insert(kind, req.mode);
+        self.select_result(kind, None);
+        let mut submitted = self.studio(kind).last_submission;
+        submitted.set(Some(Submission::start(
+            provider,
+            &req,
+            &self.history.peek(),
+            (js_sys::Date::now() / 1000.0) as i64,
+        )));
+        self.error.set(None);
+        spawn_local(async move {
+            match ipc::generate_for(provider, &req).await {
+                Ok(record)
+                    if record.kind == kind
+                        && record.provider == provider
+                        && submitted.peek().is_some() =>
+                {
+                    submitted.set(Some(Submission::Recorded(record.id)));
+                }
+                Err(message) => {
+                    if let Some(Submission::Awaiting { error, .. }) = submitted.write().as_mut() {
+                        *error = Some(message);
+                    }
+                }
+                _ => {}
+            }
+            self.refresh_history().await;
+            self.generating.write().remove(&kind);
+        });
+    }
+
+    /// Recovery обходит все Pending, в том числе ещё без request_id.
+    /// Запускаем его только между генерациями, чтобы не пометить активный
+    /// HTTP-запрос как прерванный в предыдущей сессии.
+    pub(crate) fn check_pending(mut self) {
+        if !self.media_idle() {
+            return;
+        }
+        self.recovering.set(true);
+        self.error.set(None);
+        spawn_local(async move {
+            if let Err(e) = ipc::recover_pending().await {
+                self.error.set(Some(e));
+            }
+            self.refresh_history().await;
+            self.recovering.set(false);
+        });
+    }
+
+    pub(crate) fn media_locked(self) -> bool {
+        *self.busy.read()
+            || *self.provider_changes.read() != 0
+            || *self.recovering.read()
+            || self.update.read().requires_restart()
+    }
+
+    pub(crate) fn media_idle(self) -> bool {
+        !self.media_locked() && self.generating.read().is_empty()
+    }
+
     /// Применяет настройки к сигналам состояния (без записи в SQLite).
     pub fn apply_settings(mut self, settings: Settings) {
+        if self.settings.peek().provider != settings.provider {
+            self.invalidate_catalog();
+        } else if self.settings.peek().show_real_balance != settings.show_real_balance {
+            self.invalidate_balance();
+        }
         self.lang.set(settings.lang);
         self.theme.set(settings.theme);
         self.settings.set(settings);
@@ -126,20 +290,20 @@ impl AppState {
     /// Номер монотонно растёт с каждым стартом сохранения; откат сверяет его
     /// с текущим, чтобы не затереть более новый оптимистичный apply.
     fn next_generation(mut self) -> u64 {
-        let next = (self.persist_gen)() + 1;
+        let next = *self.persist_gen.peek() + 1;
         self.persist_gen.set(next);
         next
     }
 
     /// Текущий номер persist-поколения (последний стартовавший persist).
     fn current_generation(self) -> u64 {
-        (self.persist_gen)()
+        *self.persist_gen.peek()
     }
 
     /// Сохраняет настройки через IPC: оптимистичное применение и откат при ошибке.
     ///
     /// Сначала применяет `settings` к сигналам (UI мгновенно отражает выбор),
-    /// затем пишет в SQLite. При успехе очищает баннер ошибки. При отказе
+    /// затем пишет в SQLite. При отказе
     /// записывает причину в `error` и откатывает сигналы к сохранённым значениям
     /// ([`ipc::get_settings`], при неудаче чтения — снимок до применения).
     ///
@@ -151,27 +315,67 @@ impl AppState {
     /// Возвращает результат записи для вызывающего кода (например, обновить
     /// баланс только после успешного включения `show_real_balance`); ошибка
     /// также доступна в сигнале `error`.
-    pub async fn persist_settings(mut self, settings: Settings) -> Result<(), String> {
-        let generation = self.next_generation();
-        let previous = (self.settings)();
-        // Оптимистичное применение: Settings мал (строка + три enum), клон осознанный.
-        self.apply_settings(settings.clone());
-        match ipc::set_settings(&settings).await {
-            Ok(()) => {
-                self.error.set(None);
-                Ok(())
-            }
-            Err(e) => {
-                self.error.set(Some(e.clone()));
-                let stored = ipc::get_settings().await.ok();
-                if let Some(target) =
-                    rollback_target(generation, self.current_generation(), stored, previous)
-                {
-                    self.apply_settings(target);
-                }
-                Err(e)
-            }
+    pub async fn persist_settings(self, settings: Settings) -> Result<(), String> {
+        self.queue_settings(settings)
+            .await
+            .map_err(|e| e.to_string())?
+    }
+
+    // Записи идут в порядке изменений, даже если UI перешёл на другой экран.
+    // Снятие подписки вызывающей формы не прерывает запись в SQLite.
+    fn queue_settings(mut self, mut settings: Settings) -> oneshot::Receiver<Result<(), String>> {
+        if !settings.workspace.remember_models {
+            settings.workspace.model_choices.clear();
         }
+        let generation = self.next_generation();
+        let previous = self.settings.peek().clone();
+        let changed = previous.provider != settings.provider;
+        if changed {
+            *self.provider_changes.write() += 1;
+        }
+        self.apply_settings(settings.clone());
+
+        let (done, tail) = oneshot::channel();
+        let predecessor = self.write_tail.write().replace(tail);
+        let (reply, result) = oneshot::channel();
+        spawn_local(async move {
+            if let Some(predecessor) = predecessor {
+                let _ = predecessor.await;
+            }
+            let written = ipc::set_settings(&settings).await;
+            match &written {
+                Ok(()) => {
+                    let switched = *self.committed_provider.peek() != settings.provider;
+                    self.committed_provider.set(settings.provider);
+                    if (changed || switched) && self.settings.peek().provider == settings.provider {
+                        self.credential_changed();
+                    }
+                }
+                Err(e) => {
+                    self.error.set(Some(e.clone()));
+                    if self.current_generation() == generation {
+                        let stored = ipc::get_settings().await.ok();
+                        if let Some(target) =
+                            rollback_target(generation, self.current_generation(), stored, previous)
+                        {
+                            let restore_catalog =
+                                changed || self.settings.peek().provider != target.provider;
+                            self.committed_provider.set(target.provider);
+                            self.apply_settings(target);
+                            if restore_catalog {
+                                self.credential_changed();
+                            }
+                        }
+                    }
+                }
+            }
+            if changed {
+                *self.provider_changes.write() -= 1;
+            }
+            let _ = done.send(());
+            let _ = reply.send(written);
+        });
+        result
     }
 
     /// Подписка на события ядра — РОВНО ОДИН вызов [`ipc::on_event`].
@@ -179,10 +383,10 @@ impl AppState {
     /// `generation:*` перечитывают историю, `balance:updated` — баланс.
     fn subscribe_events(self) {
         ipc::on_event(move |event| match event {
-            AppEvent::GenerationStarted { .. }
-            | AppEvent::GenerationDone { .. }
-            | AppEvent::GenerationFailed { .. } => {
-                spawn_local(async move { self.refresh_history().await });
+            AppEvent::GenerationStarted { history_id }
+            | AppEvent::GenerationDone { history_id }
+            | AppEvent::GenerationFailed { history_id, .. } => {
+                spawn_local(async move { self.refresh_history_after(Some(&history_id)).await });
             }
             AppEvent::BalanceUpdated => {
                 spawn_local(async move { self.refresh_balance().await });
@@ -218,66 +422,132 @@ impl AppState {
 
     /// Стартовая загрузка: настройки, проверка ключа, восстановление Pending,
     /// история, баланс, каталоги.
-    ///
-    /// Каждый успех очищает баннер ошибки, отказ — записывает причину
-    /// (семантика «последняя операция», см. поле `error`).
     async fn load(mut self) {
         self.busy.set(true);
-        self.error.set(None);
         match ipc::get_settings().await {
-            Ok(settings) => self.apply_settings(settings),
-            Err(e) => self.error.set(Some(e)),
+            Ok(settings) => {
+                self.load_choices(&settings);
+                self.committed_provider.set(settings.provider);
+                self.apply_settings(settings);
+                self.settings_ready.set(true);
+            }
+            Err(e) => self.background_error.set(Some(e)),
         }
         // Проверка ключа первого запуска: Ok(false) — ключа нет/отклонён →
         // онбординг; Err — соединение не проверено, редирект не нужен.
-        let check = ipc::test_connection().await;
-        match &check {
-            Ok(_) => self.error.set(None),
-            Err(e) => self.error.set(Some(e.clone())),
+        if self.settings.peek().provider == Provider::CheaperInference {
+            let revision = *self.credential_revision.peek();
+            let check = ipc::test_connection(None).await;
+            if revision == *self.credential_revision.peek() {
+                if let Err(e) = &check {
+                    self.background_error.set(Some(e.clone()));
+                }
+                self.onboarding_needed.set(needs_onboarding(check));
+            }
         }
-        self.onboarding_needed.set(needs_onboarding(check));
         // Восстанавливаем Pending-записи, пережившие перезапуск, затем читаем историю.
-        match ipc::recover_pending().await {
-            Ok(_) => self.error.set(None),
-            Err(e) => self.error.set(Some(e)),
+        if let Err(e) = ipc::recover_pending().await {
+            self.background_error.set(Some(e));
         }
         self.refresh_history().await;
         self.refresh_balance().await;
         for kind in [MediaKind::Image, MediaKind::Video, MediaKind::Audio] {
-            match ipc::fetch_models(kind).await {
-                Ok(models) => {
-                    self.error.set(None);
-                    self.models_by_kind.write().insert(kind, models);
-                }
-                Err(e) => self.error.set(Some(e)),
-            }
+            self.refresh_models(kind).await;
         }
         self.busy.set(false);
     }
 
-    /// Перечитывает историю без фильтра (новые первыми); успех очищает баннер ошибки.
-    async fn refresh_history(mut self) {
-        match ipc::list_history(&HistoryFilter::default()).await {
-            Ok(records) => {
-                self.error.set(None);
-                self.history.set(records);
+    /// Смена ключа меняет доступные маршруты, тарифы и кошелёк.
+    pub(crate) fn credential_changed(self) {
+        self.invalidate_catalog();
+        spawn_local(async move { self.refresh_balance().await });
+        spawn_local(async move {
+            for kind in [MediaKind::Image, MediaKind::Video, MediaKind::Audio] {
+                self.refresh_models(kind).await;
             }
-            Err(e) => self.error.set(Some(e)),
+        });
+    }
+
+    fn invalidate_catalog(mut self) {
+        *self.credential_revision.write() += 1;
+        self.models_by_kind.write().clear();
+        self.invalidate_balance();
+        self.background_error.set(None);
+    }
+
+    fn invalidate_balance(mut self) {
+        *self.balance_revision.write() += 1;
+        self.balance.set(BalanceState::Loading);
+    }
+
+    pub(crate) async fn refresh_models(mut self, kind: MediaKind) {
+        if self.settings.peek().provider != Provider::CheaperInference {
+            return;
+        }
+
+        let revision = *self.credential_revision.peek();
+        let models = ipc::fetch_models(kind).await;
+        if revision != *self.credential_revision.peek() {
+            return;
+        }
+        match models {
+            Ok(models) => {
+                self.models_by_kind.write().insert(kind, models);
+            }
+            Err(e) => self.background_error.set(Some(e)),
         }
     }
 
-    /// Перечитывает баланс; успех очищает баннер ошибки.
+    /// Перечитывает историю без фильтра; последнее чтение имеет приоритет.
+    pub(crate) async fn refresh_history(self) {
+        self.refresh_history_after(None).await;
+    }
+
+    async fn refresh_history_after(mut self, event_id: Option<&str>) {
+        let revision = *self.history_revision.peek() + 1;
+        self.history_revision.set(revision);
+        let result = ipc::list_history(&HistoryFilter::default()).await;
+        if revision == *self.history_revision.peek() {
+            match result {
+                Ok(records) => {
+                    for kind in [MediaKind::Image, MediaKind::Video, MediaKind::Audio] {
+                        let mut submitted = self.studio(kind).last_submission;
+                        let id = submitted
+                            .peek()
+                            .as_ref()
+                            .and_then(|s| s.inserted(&records, event_id))
+                            .map(|r| r.id.clone());
+                        if let Some(id) = id {
+                            submitted.set(Some(Submission::Recorded(id)));
+                        }
+                    }
+                    self.history.set(records);
+                }
+                Err(e) => self.background_error.set(Some(e)),
+            }
+        }
+    }
+
+    /// Перечитывает баланс.
     ///
     /// Доступен экранам (кнопка «Обновить» в настройках); вызывается также
     /// по событию `balance:updated`.
     pub(crate) async fn refresh_balance(mut self) {
-        match ipc::fetch_balance().await {
-            Ok(view) => {
-                self.error.set(None);
-                self.balance.set(Some(view));
-            }
-            Err(e) => self.error.set(Some(e)),
+        let provider = self.settings.peek().provider;
+        if provider != *self.committed_provider.peek() {
+            return;
         }
+        self.invalidate_balance();
+        let revision = *self.balance_revision.peek();
+        let result = ipc::fetch_balance(provider).await;
+        if revision != *self.balance_revision.peek() || provider != self.settings.peek().provider {
+            return;
+        }
+        self.balance.set(match result {
+            Ok(view) if view.provider == provider => BalanceState::Ready(view),
+            Ok(_) => BalanceState::Failed(tr(*self.lang.peek(), "ws.balance_wrong_profile").into()),
+            Err(e) => BalanceState::Failed(e),
+        });
     }
 
     /// Применяет тему и язык к документу: `data-theme` и `lang` на `<html>`.
@@ -286,6 +556,7 @@ impl AppState {
     /// эффект на их изменение. Сбой записи атрибута логируется, не паникует.
     pub(crate) fn apply_document_theme(self, resolved: Theme) {
         let lang = (self.lang)();
+        let prefs = self.settings.read();
         let Some(root) = web_sys::window()
             .and_then(|w| w.document())
             .and_then(|d| d.document_element())
@@ -295,6 +566,22 @@ impl AppState {
         for (name, value) in [
             ("data-theme", theme_name(resolved)),
             ("lang", lang_name(lang)),
+            (
+                "data-density",
+                if prefs.workspace.compact {
+                    "compact"
+                } else {
+                    "comfortable"
+                },
+            ),
+            (
+                "data-motion",
+                if prefs.workspace.reduce_motion {
+                    "reduced"
+                } else {
+                    "system"
+                },
+            ),
         ] {
             if let Err(e) = root.set_attribute(name, value) {
                 web_sys::console::error_1(
@@ -303,6 +590,40 @@ impl AppState {
             }
         }
     }
+}
+
+/// Ядро сохраняет целый GenerationRequest, включая исходные изображения.
+/// Старая запись, где сохранены только GenParams, опирается на поля строки.
+fn request_from_history(record: &HistoryRecord) -> Option<GenerationRequest> {
+    if let Ok(req) = serde_json::from_str::<GenerationRequest>(&record.params_json) {
+        return (req.kind == record.kind && req.mode == record.mode).then_some(req);
+    }
+    let saved = serde_json::from_str::<serde_json::Value>(&record.params_json).ok()?;
+    let fields = saved.as_object()?;
+    if [
+        "kind",
+        "mode",
+        "model",
+        "prompt",
+        "references",
+        "mask_data_url",
+        "params",
+    ]
+    .iter()
+    .any(|key| fields.contains_key(*key))
+    {
+        // Повреждённый полный запрос нельзя молча повторить без вложений.
+        return None;
+    }
+    Some(build_request(
+        record.kind,
+        record.mode,
+        &record.model,
+        &record.prompt,
+        serde_json::from_value(saved).ok()?,
+        Vec::new(),
+        None,
+    ))
 }
 
 /// Решает, нужен ли онбординг первого запуска по результату стартовой проверки.
@@ -397,6 +718,237 @@ pub fn use_t(key: &'static str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use km_shared::{GenParams, JobStatus, Reference};
+
+    fn edit_record(params_json: String) -> HistoryRecord {
+        HistoryRecord {
+            id: "edit".into(),
+            provider: Provider::CheaperInference,
+            created_at: 1,
+            updated_at: 1,
+            kind: MediaKind::Image,
+            mode: GenMode::ImageEdit,
+            model: "test-edit".into(),
+            prompt: "Кадр".into(),
+            status: JobStatus::Completed,
+            request_id: None,
+            local_paths: vec![],
+            cost_usd: None,
+            params_json,
+            error: None,
+        }
+    }
+
+    fn with_studio(test: impl FnOnce(AppState)) {
+        let dom = VirtualDom::new(VNode::empty);
+        dom.runtime()
+            .in_scope(ScopeId::ROOT, || test(AppState::new()));
+    }
+
+    #[test]
+    fn mode_drafts_and_active_tabs_survive_navigation_and_history_repeat() {
+        with_studio(|state| {
+            let mut images = state.studio(MediaKind::Image);
+            let mut text = *images.active.peek();
+            text.select_model("first-image".into());
+            text.prompt.set("Пейзаж".into());
+            text.params.write().size = Some("1536x1024".into());
+            let expected_text = text.request(MediaKind::Image);
+
+            let edit = build_request(
+                MediaKind::Image,
+                GenMode::ImageEdit,
+                "independent-edit",
+                "Осветлить фон",
+                GenParams {
+                    size: Some("1024x1536".into()),
+                    n: Some(2),
+                    ..Default::default()
+                },
+                vec![Reference {
+                    data_url: "data:image/png;base64,AQ==".into(),
+                }],
+                Some("data:image/png;base64,Ag==".into()),
+            );
+            state
+                .repeat_record(&edit_record(serde_json::to_string(&edit).unwrap()))
+                .unwrap();
+            let edited = *images.active.peek();
+            assert_eq!(edited.request(MediaKind::Image), edit);
+
+            let mut audio = state.studio(MediaKind::Audio);
+            let mut music = audio
+                .drafts
+                .read()
+                .iter()
+                .copied()
+                .find(|d| d.mode == GenMode::Music)
+                .unwrap();
+            audio.active.set(music);
+            music.prompt.set("Вальс".into());
+            images.active.set(text);
+            assert_eq!(
+                state
+                    .studio(MediaKind::Image)
+                    .active
+                    .peek()
+                    .request(MediaKind::Image),
+                expected_text
+            );
+            images.active.set(edited);
+            assert_eq!(
+                state
+                    .studio(MediaKind::Image)
+                    .active
+                    .peek()
+                    .request(MediaKind::Image),
+                edit
+            );
+            assert_eq!(
+                state
+                    .studio(MediaKind::Audio)
+                    .active
+                    .peek()
+                    .prompt
+                    .peek()
+                    .as_str(),
+                "Вальс"
+            );
+        });
+    }
+
+    #[test]
+    fn remembered_choices_restore_only_model_format_and_count() {
+        with_studio(|state| {
+            let mut settings = Settings::default();
+            settings.workspace.model_choices.insert(
+                GenMode::ImageEdit,
+                ModelChoice {
+                    model: "saved-edit".into(),
+                    size: Some("1536x1024".into()),
+                    n: Some(2),
+                    ..Default::default()
+                },
+            );
+            state.load_choices(&settings);
+            let image = state.studio(MediaKind::Image);
+            let draft = image
+                .drafts
+                .read()
+                .iter()
+                .copied()
+                .find(|d| d.mode == GenMode::ImageEdit)
+                .unwrap();
+            let req = draft.request(MediaKind::Image);
+            assert_eq!(req.model, "saved-edit");
+            assert_eq!(req.params.n, Some(2));
+            assert_eq!(req.params.size.as_deref(), Some("1536x1024"));
+            assert!(
+                req.prompt.is_empty() && req.references.is_empty() && req.mask_data_url.is_none()
+            );
+            assert!(image.active.peek().model.peek().is_empty());
+        });
+    }
+
+    #[test]
+    fn selected_results_belong_to_provider_and_kind() {
+        with_studio(|mut state| {
+            state.select_result(MediaKind::Image, Some("picture".into()));
+            assert_eq!(
+                state.selected_result(MediaKind::Image).as_deref(),
+                Some("picture")
+            );
+            assert!(state.selected_result(MediaKind::Video).is_none());
+            state.settings.write().provider = Provider::OpenRouter;
+            assert!(state.selected_result(MediaKind::Image).is_none());
+            state.settings.write().provider = Provider::CheaperInference;
+            assert_eq!(
+                state.selected_result(MediaKind::Image).as_deref(),
+                Some("picture")
+            );
+        });
+    }
+
+    #[test]
+    fn first_model_is_sticky_and_veo_defaults_apply_only_when_choosing_another_model() {
+        with_studio(|state| {
+            let models: Vec<CatalogModel> = serde_json::from_value(serde_json::json!([
+                {"id":"veo-3.1-generate-001","model_type":"video","features":["image-input"],"supported_endpoints":["/v1/videos/generations"]},
+                {"id":"another-r2v","model_type":"video","supported_endpoints":["/v1/videos/generations"]}
+            ])).unwrap();
+            let section = state.studio(MediaKind::Video);
+            let mut draft = section
+                .drafts
+                .read()
+                .iter()
+                .copied()
+                .find(|d| d.mode == GenMode::ReferenceToVideo)
+                .unwrap();
+            draft.choose_initial_model(MediaKind::Video, &[]);
+            assert!(draft.model.peek().is_empty());
+            draft.choose_initial_model(MediaKind::Video, &models);
+            assert_eq!(draft.model.peek().as_str(), models[0].id);
+            assert_eq!(draft.params.peek().duration_seconds, Some(8.0));
+
+            draft.params.write().duration_seconds = None;
+            draft.choose_initial_model(MediaKind::Video, &[models[1].clone(), models[0].clone()]);
+            draft.choose_initial_model(MediaKind::Video, &models[1..]);
+            assert_eq!(
+                draft.model.peek().as_str(),
+                models[0].id,
+                "исчезнувшую модель не подменяем"
+            );
+            draft.select_model(models[0].id.clone());
+            assert_eq!(
+                draft.params.peek().duration_seconds,
+                None,
+                "выбор той же модели не перезаписывает ввод"
+            );
+            draft.select_model(models[1].id.clone());
+            draft.select_model(models[0].id.clone());
+            assert_eq!(draft.params.peek().duration_seconds, Some(8.0));
+
+            let mut historical = draft.request(MediaKind::Video);
+            historical.params.duration_seconds = Some(6.0);
+            assert!(section.restore(historical.clone()));
+            draft.choose_initial_model(MediaKind::Video, &models);
+            assert_eq!(
+                draft.request(MediaKind::Video),
+                historical,
+                "при повторе сохраняем параметры истории даже если нужна коррекция"
+            );
+        });
+    }
+
+    #[test]
+    fn repeat_preserves_original_edit_references_mask_and_parameters() {
+        let req = build_request(
+            MediaKind::Image,
+            GenMode::ImageEdit,
+            "test-edit",
+            "Кадр",
+            GenParams {
+                n: Some(2),
+                ..Default::default()
+            },
+            vec![Reference {
+                data_url: "data:image/png;base64,AQ==".into(),
+            }],
+            Some("data:image/png;base64,Ag==".into()),
+        );
+        let record = edit_record(serde_json::to_string(&req).unwrap());
+        assert_eq!(request_from_history(&record), Some(req));
+    }
+
+    #[test]
+    fn repeat_reads_params_only_records_and_rejects_broken_envelopes() {
+        let record = edit_record(r#"{"n":2,"size":"1024x1024"}"#.into());
+        let req = request_from_history(&record).unwrap();
+        assert_eq!(req.prompt, record.prompt);
+        assert_eq!(req.params.n, Some(2));
+        let broken = edit_record(r#"{"kind":"image","references":"broken"}"#.into());
+        assert_eq!(request_from_history(&broken), None);
+    }
 
     #[test]
     fn resolve_theme_system_follows_preference() {
@@ -468,6 +1020,7 @@ mod tests {
             lang: Lang::Ru,
             theme,
             show_real_balance: false,
+            ..Settings::default()
         }
     }
 

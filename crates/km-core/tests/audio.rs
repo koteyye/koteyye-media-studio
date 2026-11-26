@@ -97,16 +97,14 @@ async fn speech_sends_full_body_and_parses_binary_with_cost() {
 }
 
 #[tokio::test]
-async fn speech_defaults_format_to_mp3_and_omits_absent_params() {
+async fn speech_uses_provider_defaults_for_unspecified_params() {
     let server = MockServer::start().await;
-    // Голос, скорость и формат не заданы — в теле только model, input и
-    // response_format по умолчанию "mp3"; ключей voice/speed нет.
+    // Без явного выбора параметры озвучки остаются за моделью.
     let guard = Mock::given(method("POST"))
         .and(path("/v1/audio/speech"))
         .and(body_json(json!({
             "model": "eleven-v4",
             "input": "кот в шляпе",
-            "response_format": "mp3",
         })))
         .respond_with(audio_response("audio/mpeg", "0.020000"))
         .expect(1)
@@ -152,16 +150,14 @@ async fn speech_passes_custom_response_format() {
 }
 
 #[tokio::test]
-async fn music_omits_voice_speed_format_and_sends_duration() {
+async fn music_omits_voice_speed_format_and_undocumented_duration_from_old_history() {
     let server = MockServer::start().await;
-    // Музыка: voice/speed/response_format не уходят, даже если заданы в params;
-    // duration_seconds пробрасывается как доп.свойство. Тот же эндпоинт.
+    // Старая запись может содержать параметры других режимов, включая duration.
     let guard = Mock::given(method("POST"))
         .and(path("/v1/audio/speech"))
         .and(body_json(json!({
             "model": "music-v2",
             "input": "кот в шляпе",
-            "duration_seconds": 30.0,
         })))
         .respond_with(audio_response("audio/mpeg", "0.050000"))
         .expect(1)
@@ -207,6 +203,7 @@ async fn sound_effects_maps_to_same_endpoint_minimal_body() {
     req.mode = GenMode::SoundEffects;
     req.model = "sound-effects-v2".to_owned();
     req.params.voice = Some("alloy".to_owned());
+    req.params.duration_seconds = Some(12.0);
     client_for(&server)
         .speech(&req)
         .await
@@ -245,7 +242,6 @@ async fn input_of_4096_chars_is_accepted() {
         .and(body_json(json!({
             "model": "eleven-v4",
             "input": prompt,
-            "response_format": "mp3",
         })))
         .respond_with(audio_response("audio/mpeg", "0.020000"))
         .expect(1)
@@ -408,5 +404,47 @@ async fn missing_content_type_defaults_to_audio_mpeg() {
     assert_eq!(
         output.content_type, "audio/mpeg",
         "без Content-Type — дефолт audio/mpeg для mp3"
+    );
+}
+
+#[tokio::test]
+async fn octet_stream_detects_wav_and_white_label_request_id() {
+    let server = MockServer::start().await;
+    let wav = b"RIFF\x10\0\0\0WAVEfmt ";
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/speech"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(wav.as_slice())
+                .insert_header("content-type", "application/octet-stream")
+                .insert_header("x-request-id", "audio_request_42"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let output = client_for(&server).speech(&speech_request()).await.unwrap();
+    assert_eq!(output.bytes, wav);
+    assert_eq!(output.content_type, "audio/wav");
+    assert_eq!(output.request_id.as_deref(), Some("audio_request_42"));
+    assert!(output.cost_usd.is_none());
+}
+
+#[tokio::test]
+async fn unexpected_successful_json_is_an_error_with_receipt() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/speech"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"message":"missing audio"}))
+                .insert_header("x-ci-request-id", "audio_json")
+                .insert_header("x-ci-billed-cost-usd", "0.02"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert!(
+        matches!(client_for(&server).speech(&speech_request()).await,
+        Err(CoreError::Receipt { request_id, cost_usd:Some(0.02), .. }) if request_id == "audio_json")
     );
 }

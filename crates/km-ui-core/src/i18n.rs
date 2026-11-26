@@ -40,6 +40,10 @@ fn entry(key: &str) -> Option<(&'static str, &'static str)> {
     Some(match key {
         // Общие действия и состояния.
         "common.ok" => ("ОК", "OK"),
+        "settings.delete_key" => ("Удалить ключ", "Delete key"),
+        "settings.confirm_delete_key" => {
+            ("Удалить сохранённый API-ключ?", "Delete the saved API key?")
+        }
         "common.cancel" => ("Отмена", "Cancel"),
         "common.save" => ("Сохранить", "Save"),
         "common.delete" => ("Удалить", "Delete"),
@@ -55,7 +59,7 @@ fn entry(key: &str) -> Option<(&'static str, &'static str)> {
         "common.close" => ("Закрыть", "Close"),
         // Студия: вкладки медиа и поля формы генерации.
         "studio.title" => ("Студия", "Studio"),
-        "studio.image" => ("Изображение", "Image"),
+        "studio.image" => ("Изображения", "Images"),
         "studio.video" => ("Видео", "Video"),
         "studio.audio" => ("Аудио", "Audio"),
         "studio.prompt" => ("Промпт", "Prompt"),
@@ -79,6 +83,7 @@ fn entry(key: &str) -> Option<(&'static str, &'static str)> {
         "studio.mode.music" => ("Музыка", "Music"),
         "studio.mode.sfx" => ("Звуковые эффекты", "Sound effects"),
         // История.
+        "history.to_form" => ("В форму", "Use in form"),
         "history.title" => ("История", "History"),
         "history.search" => ("Поиск", "Search"),
         "history.all" => ("Все", "All"),
@@ -96,7 +101,15 @@ fn entry(key: &str) -> Option<(&'static str, &'static str)> {
         "settings.system" => ("Системная", "System"),
         "settings.show_real_balance" => ("Показывать реальный баланс", "Show real balance"),
         "settings.key_missing" => ("API-ключ не задан", "API key is not set"),
+        "settings.key_removed" => (
+            "Ключ удалён. Доступен публичный каталог.",
+            "Key removed. The public catalog is available.",
+        ),
         "settings.keychain_error" => ("Ошибка доступа к связке ключей", "Keychain access error"),
+        "settings.draft_key_ok" => (
+            "Ключ принят. Нажмите «Сохранить», чтобы пользоваться им в студии.",
+            "Key accepted. Select Save to use it in the studio.",
+        ),
         "settings.connection_ok" => ("Соединение установлено", "Connection OK"),
         "settings.connection_failed" => ("Не удалось подключиться", "Connection failed"),
         "settings.connection_rejected" => (
@@ -141,6 +154,12 @@ fn entry(key: &str) -> Option<(&'static str, &'static str)> {
             "«Пропустить» оставит текущую папку. Без папки сохранения генерация недоступна — файлы некуда записывать; папку можно выбрать в Настройках.",
             "Skip keeps the current folder. Without a save folder generation is unavailable — there is nowhere to write files; you can choose a folder in Settings.",
         ),
-        _ => return None,
+        _ => {
+            return crate::studio_controls_i18n::entry(key)
+                .or_else(|| crate::settings_workspace_i18n::entry(key))
+                .or_else(|| crate::studio_i18n::entry(key))
+                .or_else(|| crate::media_i18n::lookup(key))
+                .or_else(|| crate::generator_i18n::entry(key));
+        }
     })
 }

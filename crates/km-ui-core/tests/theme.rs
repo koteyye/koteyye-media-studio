@@ -13,6 +13,11 @@ const TOKENS: &[&str] = &[
     "--accent:",
     "--accent-hover:",
     "--on-accent:",
+    "--accent-text:",
+    "--control-border:",
+    "--selected-bg:",
+    "--input-bg:",
+    "--matte:",
 ];
 
 #[test]
@@ -25,7 +30,7 @@ fn accent_consts_pinned() {
 #[test]
 fn dark_graphite_vars() {
     let vars = theme_vars(Dark);
-    assert!(vars.contains("--bg:#0a0c10"), "dark bg: {vars}");
+    assert!(vars.contains("--bg:#101113"), "dark bg: {vars}");
     assert!(vars.contains("--accent:#e05616"), "dark accent: {vars}");
     assert!(
         vars.contains("--accent-hover:#ff7333"),
@@ -39,7 +44,7 @@ fn dark_graphite_vars() {
 #[test]
 fn light_air_vars() {
     let vars = theme_vars(Light);
-    assert!(vars.contains("--bg:#f5f6f8"), "light bg: {vars}");
+    assert!(vars.contains("--bg:#f8f8f7"), "light bg: {vars}");
     assert!(vars.contains("--accent:#e05616"), "light accent: {vars}");
     assert!(
         vars.contains("--accent-hover:#ff7333"),
@@ -78,5 +83,35 @@ fn vars_match_accent_consts() {
             vars.contains(&format!("--on-accent:{ON_ACCENT}")),
             "on-accent константа разошлась с токенами {theme:?}: {vars}"
         );
+    }
+}
+
+#[test]
+fn accent_text_meets_aa_on_both_surfaces() {
+    fn luminance(vars: &str, key: &str) -> f64 {
+        let (_, color) = vars.split_once(&format!("--{key}:#")).unwrap();
+        [0.2126, 0.7152, 0.0722]
+            .iter()
+            .enumerate()
+            .map(|(i, weight)| {
+                let s =
+                    f64::from(u8::from_str_radix(&color[2 * i..2 * i + 2], 16).unwrap()) / 255.0;
+                weight
+                    * if s <= 0.04045 {
+                        s / 12.92
+                    } else {
+                        ((s + 0.055) / 1.055).powf(2.4)
+                    }
+            })
+            .sum()
+    }
+
+    for theme in [Dark, Light] {
+        let vars = theme_vars(theme);
+        let text = luminance(vars, "accent-text");
+        for surface in ["bg", "surface"] {
+            let bg = luminance(vars, surface);
+            assert!((text.max(bg) + 0.05) / (text.min(bg) + 0.05) >= 4.5);
+        }
     }
 }

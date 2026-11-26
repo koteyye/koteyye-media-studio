@@ -11,15 +11,15 @@
 //! восстановления — локальный расход изменился.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use km_core::{CoreError, by_kind};
 use km_shared::{
-    AppEvent, BalanceView, CatalogModel, GenerationRequest, HistoryFilter, HistoryRecord,
-    JobStatus, MediaKind, Settings,
+    AppEvent, BalanceUnavailable, BalanceView, CatalogModel, GenerationRequest, HistoryFilter,
+    HistoryRecord, JobStatus, MediaKind, Provider, Settings,
 };
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
@@ -51,10 +51,21 @@ pub async fn cmd_get_settings(state: &AppState) -> Result<Settings, String> {
 ///
 /// Строка с причиной, если запись не удалась.
 pub async fn cmd_set_settings(state: &AppState, settings: Settings) -> Result<(), String> {
+    let _writing = state
+        .settings_write
+        .lock()
+        .map_err(|_| "не удалось заблокировать настройки")?;
+    let prior = state
+        .storage
+        .get_settings()
+        .map_err(|e| e.to_string())?
+        .provider;
     state
         .storage
         .set_settings(&settings)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    state.provider_changed(prior, settings.provider);
+    Ok(())
 }
 
 /// Сохраняет API-ключ в [`KeyStore`](crate::keychain::KeyStore) (keychain).
@@ -65,12 +76,51 @@ pub async fn cmd_set_settings(state: &AppState, settings: Settings) -> Result<()
 ///
 /// Строка с причиной, если keychain не принял ключ.
 pub async fn cmd_set_api_key(state: &AppState, key: &str) -> Result<(), String> {
+    cmd_set_provider_key(state, Provider::CheaperInference, key).await
+}
+
+pub async fn cmd_provider_has_key(state: &AppState, provider: Provider) -> Result<bool, String> {
+    state.has_key(provider).await
+}
+
+pub async fn cmd_set_provider_key(
+    state: &AppState,
+    provider: Provider,
+    key: &str,
+) -> Result<(), String> {
     let key = key.trim();
-    if key.is_empty() {
-        state.key_store.delete()
-    } else {
-        state.key_store.set(key)
+    if let Some(other) = foreign_key(provider, key) {
+        return Err(format!(
+            "ключ {} не подходит профилю {}",
+            other.name(),
+            provider.name()
+        ));
     }
+    state.write_key(provider, key.to_owned()).await?;
+    state.invalidate_balance(provider);
+    Ok(())
+}
+
+/// У шлюзов могут быть и непрозрачные ключи. Отсекаем только узнаваемый ключ другого сервиса.
+fn foreign_key(provider: Provider, key: &str) -> Option<Provider> {
+    match provider {
+        Provider::OpenRouter if key.starts_with("ci_live_") || key.starts_with("ir_live_") => {
+            Some(Provider::CheaperInference)
+        }
+        Provider::CheaperInference if key.starts_with("sk-or-v1-") => Some(Provider::OpenRouter),
+        _ => None,
+    }
+}
+
+async fn stored_ci_key(state: &AppState) -> Result<Option<String>, String> {
+    let key = state.read_key(Provider::CheaperInference).await?;
+    if key
+        .as_ref()
+        .is_some_and(|k| foreign_key(Provider::CheaperInference, k.trim()).is_some())
+    {
+        return Err("в профиле Cheaper Inference сохранён ключ OpenRouter".into());
+    }
+    Ok(key)
 }
 
 /// Проверка подключения: лёгкий auth-запрос `GET /v1/models` с Bearer.
@@ -83,13 +133,47 @@ pub async fn cmd_set_api_key(state: &AppState, key: &str) -> Result<(), String> 
 ///
 /// Строка с причиной при ошибках, отличных от 401, и при сбое чтения keychain.
 pub async fn cmd_test_connection(state: &AppState) -> Result<bool, String> {
-    let Some(key) = state.key_store.get()? else {
-        return Ok(false);
+    cmd_check_key(state, None).await
+}
+
+/// Проверяет введённый ключ без записи; пустое поле означает сохранённый ключ.
+pub async fn cmd_check_key(state: &AppState, candidate: Option<&str>) -> Result<bool, String> {
+    cmd_check_provider_key(state, Provider::CheaperInference, candidate).await
+}
+
+pub async fn cmd_check_provider_key(
+    state: &AppState,
+    provider: Provider,
+    candidate: Option<&str>,
+) -> Result<bool, String> {
+    let key = match candidate.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(value) => value.to_owned(),
+        None => match state
+            .read_key(provider)
+            .await?
+            .filter(|key| !key.trim().is_empty())
+        {
+            Some(value) => value,
+            None => return Ok(false),
+        },
     };
-    match state.client(&key).models().await {
-        Ok(_) => Ok(true),
+    if foreign_key(provider, key.trim()).is_some() {
+        return Ok(false);
+    }
+    if provider == Provider::OpenRouter {
+        return state
+            .openrouter
+            .verify(&key)
+            .await
+            .map_err(|err| match err {
+                CoreError::Timeout => "таймаут проверки ключа OpenRouter".into(),
+                other => other.to_string(),
+            });
+    }
+    match state.client(&key).verify_key().await {
+        Ok(()) => Ok(true),
         Err(CoreError::Http { status: 401, .. }) => Ok(false),
-        Err(e) => Err(e.to_string()),
+        Err(e) => Err(e.to_string().replace(&key, "[скрыто]")),
     }
 }
 
@@ -105,10 +189,14 @@ pub async fn cmd_fetch_models(
     state: &AppState,
     kind: MediaKind,
 ) -> Result<Vec<CatalogModel>, String> {
-    let key = state.key_store.get()?;
+    let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
+    if settings.provider == Provider::OpenRouter {
+        return Ok(Vec::new());
+    }
+    let key = stored_ci_key(state).await?;
     let client = state.client(key.as_deref().unwrap_or_default());
     let models = match key {
-        Some(_) => client.models().await,
+        Some(_) => client.models_for_kind(kind).await,
         None => state.catalog().get_or_fetch(&client).await,
     }
     .map_err(|e| e.to_string())?;
@@ -130,11 +218,24 @@ pub async fn cmd_generate(
     state: &AppState,
     req: GenerationRequest,
 ) -> Result<HistoryRecord, String> {
-    let key = state
-        .key_store
-        .get()?
-        .ok_or_else(|| CoreError::NoKey.to_string())?;
+    cmd_generate_for(state, Provider::CheaperInference, req).await
+}
+
+pub async fn cmd_generate_for(
+    state: &AppState,
+    provider: Provider,
+    req: GenerationRequest,
+) -> Result<HistoryRecord, String> {
+    // Восстановление без request_id помечает запись как прерванную. Пока
+    // идёт запрос, Pending без request_id — нормальное состояние живой задачи.
+    let _running = state.recovery_lock().read().await;
     let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
+    if provider == Provider::OpenRouter || settings.provider == Provider::OpenRouter {
+        return Err("Генерация через OpenRouter пока недоступна".into());
+    }
+    let key = stored_ci_key(state)
+        .await?
+        .ok_or_else(|| CoreError::NoKey.to_string())?;
     if settings.local_folder.is_empty() {
         return Err(
             CoreError::Validation("папка сохранения не задана в настройках".to_owned()).to_string(),
@@ -186,18 +287,22 @@ pub async fn cmd_delete_history(state: &AppState, id: &str) -> Result<(), String
 pub async fn cmd_recover_pending(state: &AppState) -> Result<Vec<HistoryRecord>, String> {
     // Сериализация проходов: setup при старте и load() UI зовут эту команду;
     // без лока оба прочитали бы одни Pending и скачали бы файлы дважды.
-    let _guard = state.recovery_lock().lock().await;
-    let Some(key) = state.key_store.get()? else {
+    let _guard = state.recovery_lock().write().await;
+    let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
+    if settings.local_folder.is_empty()
+        || !state
+            .storage
+            .has_pending_for(Provider::CheaperInference)
+            .map_err(|e| e.to_string())?
+    {
+        return Ok(Vec::new());
+    }
+    // Активный профиль здесь роли не играет: восстановление привязано к источнику записи.
+    let Some(key) = stored_ci_key(state).await? else {
         // Без ключа запрос с пустым Bearer дал бы 401 и ядро сожгло бы
         // восстановимые записи в Failed навсегда — оставляем Pending.
         return Ok(Vec::new());
     };
-    let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
-    if settings.local_folder.is_empty() {
-        // Пустой путь записи файлов увёл бы в working directory — как
-        // cmd_generate, не пишем без папки; записи остаются Pending.
-        return Ok(Vec::new());
-    }
     let jobs = state.jobs(state.client(&key), PathBuf::from(settings.local_folder))?;
     let recovered = jobs.recover_pending().await.map_err(|e| e.to_string())?;
     if recovered.iter().any(|r| r.status == JobStatus::Completed) {
@@ -206,19 +311,75 @@ pub async fn cmd_recover_pending(state: &AppState) -> Result<Vec<HistoryRecord>,
     Ok(recovered)
 }
 
-/// Гибридный баланс: реальный из CI (если включён в настройках) + локальный расход.
+/// Реальный кошелёк, если включён в настройках, и локальный расход активного профиля.
 ///
 /// # Errors
 ///
-/// Строка с причиной при сбое хранилища или чтения keychain; 403 от CI
-/// скрывает реальный баланс, оставляя локальный (обрабатывается ядром).
+/// Ошибка БД либо смена профиля во время запроса. Ошибки удалённого
+/// кошелька оставляют доступным подтверждённый локальный расход.
 pub async fn cmd_fetch_balance(state: &AppState) -> Result<BalanceView, String> {
-    let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
-    let key = state.key_store.get()?.unwrap_or_default();
-    let jobs = state.jobs(state.client(&key), PathBuf::from(settings.local_folder))?;
-    jobs.balance_view(settings.show_real_balance)
-        .await
-        .map_err(|e| e.to_string())
+    let provider = state
+        .storage
+        .get_settings()
+        .map_err(|e| e.to_string())?
+        .provider;
+    cmd_fetch_balance_for(state, provider).await
+}
+
+pub async fn cmd_fetch_balance_for(
+    state: &AppState,
+    provider: Provider,
+) -> Result<BalanceView, String> {
+    let revision = state.balance_revision(provider);
+    let wallet_enabled = || -> Result<bool, String> {
+        let prefs = state.storage.get_settings().map_err(|e| e.to_string())?;
+        if prefs.provider != provider || state.balance_revision(provider) != revision {
+            Err("Профиль баланса изменился во время запроса".into())
+        } else {
+            Ok(prefs.show_real_balance)
+        }
+    };
+    let enabled = wallet_enabled()?;
+    let local_spend = state
+        .storage
+        .total_spend_usd(provider)
+        .map_err(|e| e.to_string())?;
+    let local = BalanceView::local(provider, local_spend);
+    if !enabled {
+        return Ok(local);
+    }
+    let credential = state.read_key(provider).await;
+    // Диалог системного keychain может завершиться спустя несколько секунд.
+    if !wallet_enabled()? {
+        return Ok(local);
+    }
+    let key = match credential {
+        Ok(Some(key)) if !key.trim().is_empty() => key,
+        Ok(_) => {
+            return Ok(BalanceView {
+                unavailable: Some(BalanceUnavailable::MissingKey),
+                ..local
+            });
+        }
+        Err(_) => {
+            return Ok(BalanceView {
+                unavailable: Some(BalanceUnavailable::KeyStore),
+                ..local
+            });
+        }
+    };
+    let key = key.trim();
+    if foreign_key(provider, key).is_some() {
+        return Ok(BalanceView {
+            unavailable: Some(BalanceUnavailable::RejectedKey),
+            ..local
+        });
+    }
+    let result = match provider {
+        Provider::CheaperInference => state.client(key).balance_view(local_spend).await,
+        Provider::OpenRouter => state.openrouter.balance_view(key, local_spend).await,
+    };
+    Ok(if wallet_enabled()? { result } else { local })
 }
 
 /// Проверяет, что путь внутри папки сохранения (защита как v1 `resolveSavedFilePath`).
@@ -227,6 +388,14 @@ pub async fn cmd_fetch_balance(state: &AppState) -> Result<BalanceView, String> 
 /// через `folder/../secret` или симлинк наружу не проходит. Файл должен
 /// существовать. Возвращает канонический путь для opener.
 fn resolve_saved_path(state: &AppState, path: &str) -> Result<PathBuf, String> {
+    if let Some(target) = recorded_media_path(Path::new(path))
+        && state
+            .storage
+            .has_result_path(path)
+            .map_err(|e| e.to_string())?
+    {
+        return Ok(target);
+    }
     let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
     if settings.local_folder.is_empty() {
         return Err("папка сохранения не задана в настройках".to_owned());
@@ -270,10 +439,26 @@ pub async fn get_settings(state: State<'_, Arc<AppState>>) -> Result<Settings, S
 /// Сохранить настройки.
 #[tauri::command]
 pub async fn set_settings(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
-    settings: Settings,
+    settings: serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), String> {
-    cmd_set_settings(&state, settings).await
+    let _writing = state
+        .settings_write
+        .lock()
+        .map_err(|_| "не удалось заблокировать настройки")?;
+    let prior = state
+        .storage
+        .get_settings()
+        .map_err(|e| e.to_string())?
+        .provider;
+    let saved = state
+        .storage
+        .merge_settings(settings)
+        .map_err(|e| e.to_string())?;
+    state.provider_changed(prior, saved.provider);
+    crate::apply_native_theme(&app, saved.theme);
+    Ok(())
 }
 
 /// Сохранить API-ключ в системный keychain (пустой ключ удаляет).
@@ -282,10 +467,39 @@ pub async fn set_api_key(state: State<'_, Arc<AppState>>, key: String) -> Result
     cmd_set_api_key(&state, &key).await
 }
 
+#[tauri::command]
+pub async fn provider_has_key(
+    state: State<'_, Arc<AppState>>,
+    provider: Provider,
+) -> Result<bool, String> {
+    cmd_provider_has_key(&state, provider).await
+}
+
+#[tauri::command]
+pub async fn set_provider_key(
+    state: State<'_, Arc<AppState>>,
+    provider: Provider,
+    key: String,
+) -> Result<(), String> {
+    cmd_set_provider_key(&state, provider, &key).await
+}
+
+#[tauri::command]
+pub async fn check_provider_key(
+    state: State<'_, Arc<AppState>>,
+    provider: Provider,
+    key: Option<String>,
+) -> Result<bool, String> {
+    cmd_check_provider_key(&state, provider, key.as_deref()).await
+}
+
 /// Проверить подключение к Cheaper Inference.
 #[tauri::command]
-pub async fn test_connection(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
-    cmd_test_connection(&state).await
+pub async fn test_connection(
+    state: State<'_, Arc<AppState>>,
+    key: Option<String>,
+) -> Result<bool, String> {
+    cmd_check_key(&state, key.as_deref()).await
 }
 
 /// Каталог моделей по виду медиа (`image`/`video`/`audio`).
@@ -300,19 +514,66 @@ pub async fn fetch_models(
 /// Запустить генерацию.
 #[tauri::command]
 pub async fn generate(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     req: GenerationRequest,
+    provider: Option<Provider>,
 ) -> Result<HistoryRecord, String> {
-    cmd_generate(&state, req).await
+    let record = cmd_generate_for(&state, provider.unwrap_or_default(), req).await?;
+    allow_result_previews(&app, std::slice::from_ref(&record));
+    Ok(record)
 }
 
 /// Список истории с фильтром.
 #[tauri::command]
 pub async fn list_history(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     filter: HistoryFilter,
 ) -> Result<Vec<HistoryRecord>, String> {
-    cmd_list_history(&state, filter).await
+    let records = cmd_list_history(&state, filter).await?;
+    allow_result_previews(&app, &records);
+    Ok(records)
+}
+
+/// Разрешаем webview читать только конкретные медиафайлы, сохранённые ядром.
+/// Удалённый файл или заменившая его ссылка не должны ломать остальную историю.
+fn allow_result_previews(app: &AppHandle, records: &[HistoryRecord]) {
+    let scope = app.asset_protocol_scope();
+    for path in records.iter().flat_map(|r| &r.local_paths) {
+        if let Some(target) = recorded_media_path(Path::new(path))
+            && let Err(e) = scope.allow_file(target)
+        {
+            eprintln!("не удалось разрешить предпросмотр: {e}");
+        }
+    }
+}
+
+pub(crate) fn recorded_media_path(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute()
+        || !matches!(
+            path.extension()?.to_str()?,
+            "jpg"
+                | "jpeg"
+                | "png"
+                | "webp"
+                | "gif"
+                | "mp4"
+                | "mp3"
+                | "wav"
+                | "ogg"
+                | "opus"
+                | "aac"
+                | "flac"
+                | "m4a"
+                | "pcm"
+        )
+    {
+        return None;
+    }
+    let canonical = dunce::canonicalize(path).ok()?;
+    // Не следуем по подменённым симлинкам ни файла, ни родительских папок.
+    (canonical == dunce::simplified(path) && canonical.is_file()).then_some(canonical)
 }
 
 /// Удалить запись истории.
@@ -331,8 +592,14 @@ pub async fn recover_pending(
 
 /// Гибридный баланс: реальный из CI плюс локальный расход.
 #[tauri::command]
-pub async fn fetch_balance(state: State<'_, Arc<AppState>>) -> Result<BalanceView, String> {
-    cmd_fetch_balance(&state).await
+pub async fn fetch_balance(
+    state: State<'_, Arc<AppState>>,
+    provider: Option<Provider>,
+) -> Result<BalanceView, String> {
+    match provider {
+        Some(provider) => cmd_fetch_balance_for(&state, provider).await,
+        None => cmd_fetch_balance(&state).await,
+    }
 }
 
 /// Выбрать папку сохранения в нативном диалоге; `None` — пользователь отменил.

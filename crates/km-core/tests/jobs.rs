@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use km_core::{CiClient, CoreError, Jobs, Storage};
 use km_shared::{
     AccountBalance, AppEvent, GenMode, GenParams, GenerationRequest, HistoryFilter, HistoryRecord,
@@ -63,7 +64,10 @@ fn video_request() -> GenerationRequest {
         mode: GenMode::TextToVideo,
         model: "veo-3.1-generate-001".to_owned(),
         prompt: "кот плывёт на плоту".to_owned(),
-        params: GenParams::default(),
+        params: GenParams {
+            duration_seconds: Some(6.0),
+            ..GenParams::default()
+        },
         references: Vec::new(),
         mask_data_url: None,
     }
@@ -85,6 +89,7 @@ fn speech_request() -> GenerationRequest {
 /// Базовая запись истории для recover/balance-сценариев.
 fn history_record(id: &str, kind: MediaKind, mode: GenMode, status: JobStatus) -> HistoryRecord {
     HistoryRecord {
+        provider: km_shared::Provider::CheaperInference,
         id: id.to_owned(),
         created_at: 1_700_000_000,
         updated_at: 1_700_000_000,
@@ -109,16 +114,20 @@ async fn received(server: &MockServer) -> Vec<wiremock::Request> {
         .expect("мок-сервер должен записать запросы")
 }
 
-/// Ответ images с двумя base64-изображениями и тарификацией строкой.
+const SMALL_PNG: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
+const SMALL_WEBP: &str = "UklGRhwAAABXRUJQVlA4TA8AAAAvAUAAAAcQ0f/+ByKi/wEA";
+
+/// Ответ в формате CI: поле content_type у изображений необязательно.
 fn two_images_response() -> Value {
     json!({
         "created": 1_730_000_000,
         "data": [
-            {"b64_json": "aGk=", "content_type": "image/png"},
-            {"b64_json": "aGk=", "content_type": "image/png"},
+            {"b64_json": SMALL_PNG},
+            {"b64_json": SMALL_WEBP},
         ],
-        "request_id": "img_123",
-        "billing": {"billed_cost_usd": "0.040000"},
+        "request_id": "8268670d-d239-4b05-99e9-aaf703977dab",
+        "billing": {"status":"settled","currency":"USD","billed_cost_usd":"0.040000"},
     })
 }
 
@@ -148,13 +157,14 @@ async fn run_image_completed_saves_files_cost_and_events() {
     assert_eq!(rec.status, JobStatus::Completed, "статус Completed");
     assert_eq!(
         rec.request_id.as_deref(),
-        Some("img_123"),
+        Some("8268670d-d239-4b05-99e9-aaf703977dab"),
         "request_id из ответа"
     );
     assert_eq!(rec.cost_usd, Some(0.04), "cost из billing строкой");
     assert_eq!(rec.local_paths.len(), 2, "два файла сохранено");
-    // Файлы реально на диске, байты декодированы из base64 ("aGk=" -> "hi").
-    for (i, path) in rec.local_paths.iter().enumerate() {
+    // Обе версии сохраняются с типом фактического содержимого даже без MIME-поля.
+    let expected = [("-1.png", SMALL_PNG), ("-2.webp", SMALL_WEBP)];
+    for (path, (suffix, b64)) in rec.local_paths.iter().zip(expected) {
         let path = PathBuf::from(path);
         assert_eq!(
             path.parent(),
@@ -162,11 +172,8 @@ async fn run_image_completed_saves_files_cost_and_events() {
             "файл в папке сохранения"
         );
         let name = path.file_name().expect("имя файла").to_string_lossy();
-        assert!(
-            name.ends_with(&format!("-{}.png", i + 1)),
-            "суффикс варианта: {name}"
-        );
-        assert_eq!(std::fs::read(&path).expect("файт должен читаться"), b"hi");
+        assert!(name.ends_with(suffix), "суффикс варианта: {name}");
+        assert_eq!(std::fs::read(&path).unwrap(), STANDARD.decode(b64).unwrap());
     }
     // Время в секундах (не миллисекунды): created_at/updated_at — unix seconds.
     assert!(rec.created_at > 1_700_000_000, "created_at в секундах");
@@ -217,7 +224,7 @@ async fn run_image_edit_uses_edits_endpoint() {
     let mut req = image_request();
     req.mode = GenMode::ImageEdit;
     req.references = vec![km_shared::Reference {
-        data_url: "data:image/png;base64,aGk=".to_owned(),
+        data_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=".to_owned(),
     }];
     let rec = jobs.run(req).await.expect("edit должен завершиться");
     assert_eq!(rec.status, JobStatus::Completed);
@@ -339,6 +346,7 @@ async fn run_audio_saves_binary_with_cost() {
             ResponseTemplate::new(200)
                 .set_body_bytes(mp3)
                 .insert_header("content-type", "audio/mpeg")
+                .insert_header("x-ci-request-id", "speech_paid")
                 .insert_header("x-ci-billed-cost-usd", "0.020000"),
         )
         .expect(1)
@@ -355,7 +363,7 @@ async fn run_audio_saves_binary_with_cost() {
         .expect("run audio должен завершиться");
     assert_eq!(rec.status, JobStatus::Completed);
     assert_eq!(rec.cost_usd, Some(0.02), "cost из заголовка");
-    assert_eq!(rec.request_id, None, "аудио не имеет request_id");
+    assert_eq!(rec.request_id.as_deref(), Some("speech_paid"));
     assert_eq!(rec.local_paths.len(), 1);
     let path = PathBuf::from(&rec.local_paths[0]);
     assert!(
@@ -365,6 +373,59 @@ async fn run_audio_saves_binary_with_cost() {
     assert_eq!(std::fs::read(&path).expect("файл"), mp3);
 
     drop(guard);
+}
+
+#[tokio::test]
+async fn paid_audio_recovers_after_output_folder_failure_without_resubmitting() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/speech"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(b"ID3original".as_slice())
+                .insert_header("content-type", "audio/mpeg")
+                .insert_header("x-ci-request-id", "paid_audio")
+                .insert_header("x-ci-billed-cost-usd", "0.02"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET")).and(path("/v1/generations/paid_audio"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "request_id":"paid_audio", "endpoint":"/v1/audio/speech",
+            "created_at":"2026-11-25T00:00:00Z", "expires_at":"2026-12-02T00:00:00Z",
+            "files":[{"index":0,"type":"audio","content_type":"audio/mpeg","size_bytes":12,
+                "url":format!("{}/signed/audio.mp3",server.uri()),"url_expires_at":"2026-11-25T01:00:00Z"}]
+        }))).expect(1).mount(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/signed/audio.mp3"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ID3recovered".as_slice()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = TempDir::new().unwrap();
+    let folder = dir.path().join("output");
+    std::fs::write(&folder, b"file instead of folder").unwrap();
+    let db = dir.path().join("history.db");
+    let (jobs, _) = jobs_with(
+        client_for(&server),
+        Storage::open(&db).unwrap(),
+        folder.clone(),
+    );
+    assert!(jobs.run(speech_request()).await.is_err());
+    let db = Storage::open(&db).unwrap();
+    let pending = db.pending().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].request_id.as_deref(), Some("paid_audio"));
+    assert_eq!(pending[0].cost_usd, Some(0.02));
+    std::fs::remove_file(folder).unwrap();
+    let recovered = jobs.recover_pending().await.unwrap();
+    assert_eq!(recovered[0].status, JobStatus::Completed);
+    assert_eq!(recovered[0].cost_usd, Some(0.02));
+    assert_eq!(
+        std::fs::read(&recovered[0].local_paths[0]).unwrap(),
+        b"ID3recovered"
+    );
 }
 
 #[tokio::test]
@@ -549,12 +610,12 @@ async fn recover_pending_invalid_request_id_fails_without_http() {
 }
 
 #[tokio::test]
-async fn recover_pending_generation_error_marks_failed() {
+async fn recover_pending_not_found_after_retention_marks_failed() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/v1/generations/req_gone"))
         .respond_with(ResponseTemplate::new(404).set_body_json(json!({
-            "error": {"code": "not_found", "message": "generation not found"},
+            "error": {"code": "generation_not_found", "message": "generation not found"},
         })))
         .mount(&server)
         .await;
@@ -1020,7 +1081,55 @@ async fn recover_pending_generation_410_marks_failed() {
 }
 
 #[tokio::test]
-async fn run_image_empty_data_marks_failed() {
+async fn malformed_image_data_recovers_with_body_receipt_and_no_second_post() {
+    const ID: &str = "135de9b7-f938-4b4a-b51d-8ff19d2bedb8";
+    let server = MockServer::start().await;
+    let png = STANDARD.decode(SMALL_PNG).unwrap();
+    Mock::given(method("POST"))
+        .and(path("/v1/images/generations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data":"wrong shape", "request_id":ID,
+            "billing":{"status":"settled","currency":"USD","billed_cost_usd":"0.031250"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET")).and(path(format!("/v1/generations/{ID}")))
+        .and(header("authorization", "Bearer ci_live_test"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object":"generation","request_id":ID,"endpoint":"/v1/images/generations",
+            "created_at":"2026-11-25T12:00:00Z","expires_at":"2026-12-02T12:00:00Z",
+            "files":[{"index":0,"type":"image","content_type":"image/png","size_bytes":png.len(),
+                "url":format!("{}/signed/image.png",server.uri()),"url_expires_at":"2026-11-26T13:00:00Z"}]
+        }))).expect(1).mount(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/signed/image.png"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(png.clone()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("history.db");
+    let reader = Storage::open(&db).unwrap();
+    let (jobs, _) = jobs_with(
+        client_for(&server),
+        Storage::open(&db).unwrap(),
+        dir.path().join("media"),
+    );
+    assert!(
+        matches!(jobs.run(image_request()).await, Err(CoreError::Receipt { request_id, cost_usd:Some(0.03125), .. }) if request_id == ID)
+    );
+    let row = reader.history(&all()).unwrap().remove(0);
+    assert_eq!(row.status, JobStatus::Pending);
+    assert_eq!(row.request_id.as_deref(), Some(ID));
+    assert_eq!(row.cost_usd, Some(0.03125));
+    let recovered = jobs.recover_pending().await.unwrap().remove(0);
+    assert_eq!(recovered.status, JobStatus::Completed);
+    assert_eq!(std::fs::read(&recovered.local_paths[0]).unwrap(), png);
+}
+
+#[tokio::test]
+async fn run_image_empty_data_keeps_receipt_for_recovery() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/images/generations"))
@@ -1042,33 +1151,23 @@ async fn run_image_empty_data_marks_failed() {
         .run(image_request())
         .await
         .expect_err("пустой data при 200 — ошибка, а не Completed");
-    assert!(
-        matches!(err, CoreError::Serde(_)),
-        "ожидался Serde: {err:?}"
-    );
+    assert!(matches!(err, CoreError::Receipt { .. }));
     let history = reader.history(&all()).expect("history");
-    assert_eq!(history.len(), 1);
-    assert_eq!(
-        history[0].status,
-        JobStatus::Failed,
-        "пустой результат -> Failed"
-    );
+    assert_eq!(history[0].status, JobStatus::Pending);
+    assert_eq!(history[0].request_id.as_deref(), Some("img_empty"));
+    assert_eq!(history[0].cost_usd, Some(0.04));
+    assert!(history[0].local_paths.is_empty());
     assert!(
-        history[0]
-            .error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("пустой"),
-        "ошибка про пустой результат: {:?}",
-        history[0].error
+        !events
+            .lock()
+            .expect("lock")
+            .iter()
+            .any(|ev| matches!(ev, AppEvent::GenerationFailed { .. }))
     );
-    assert!(history[0].local_paths.is_empty(), "файлов нет");
-    let events = events.lock().expect("lock").clone();
-    assert!(matches!(events[1], AppEvent::GenerationFailed { .. }));
 }
 
 #[tokio::test]
-async fn run_video_empty_videos_marks_failed() {
+async fn run_video_empty_videos_with_receipt_keeps_pending() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/videos/generations"))
@@ -1093,17 +1192,15 @@ async fn run_video_empty_videos_marks_failed() {
         .await
         .expect_err("пустой videos при 200 — ошибка");
     assert!(
-        matches!(err, CoreError::Serde(_)),
-        "ожидался Serde: {err:?}"
+        matches!(err, CoreError::Receipt { .. }),
+        "ожидалась квитанция: {err:?}"
     );
     let history = reader.history(&all()).expect("history");
-    assert_eq!(history[0].status, JobStatus::Failed);
-    assert!(
-        history[0]
-            .error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("пустой")
+    assert_eq!(history[0].status, JobStatus::Pending);
+    assert_eq!(history[0].request_id.as_deref(), Some("req_empty"));
+    assert_eq!(
+        history[0].error.as_deref(),
+        Some("history.recovery_response")
     );
     assert!(history[0].local_paths.is_empty());
 }
@@ -1235,7 +1332,7 @@ async fn run_audio_empty_body_marks_failed() {
 }
 
 #[tokio::test]
-async fn recover_pending_empty_files_marks_failed() {
+async fn recover_pending_empty_files_preserves_the_receipt() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/v1/generations/req_empty"))
@@ -1265,22 +1362,15 @@ async fn recover_pending_empty_files_marks_failed() {
 
     let recovered = jobs.recover_pending().await.expect("recover");
     assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].status, JobStatus::Pending);
     assert_eq!(
-        recovered[0].status,
-        JobStatus::Failed,
-        "пустой files — definitive-ответ CI, не транзиентная ошибка"
-    );
-    assert!(
-        recovered[0]
-            .error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("пустой")
+        recovered[0].error.as_deref(),
+        Some("history.recovery_response")
     );
     let history = reader.history(&all()).expect("history");
-    assert_eq!(history[0].status, JobStatus::Failed);
-    let events = events.lock().expect("lock").clone();
-    assert!(matches!(events[0], AppEvent::GenerationFailed { .. }));
+    assert_eq!(history[0].status, JobStatus::Pending);
+    assert_eq!(history[0].error, recovered[0].error);
+    assert!(events.lock().expect("lock").is_empty());
 }
 
 #[tokio::test]
@@ -1866,21 +1956,16 @@ async fn video_processing_keeps_pending() {
         let reader = Storage::open(&db).expect("reader");
         let (jobs, events) = jobs_with(client_for(&server), storage, tmp.path().join("media"));
 
-        let err = jobs
+        let pending = jobs
             .run(video_request())
             .await
-            .expect_err("незавершённый статус — не Completed");
-        assert!(
-            matches!(err, CoreError::Serde(_)),
-            "ожидался Serde: {err:?}"
-        );
-        assert!(
-            err.to_string().contains(status),
-            "ошибка содержит статус CI: {err}"
-        );
+            .expect("CI принял задание и прислал квитанцию");
+        assert_eq!(pending.status, JobStatus::Pending);
+        assert_eq!(pending.error.as_deref(), Some("history.video_processing"));
 
         let history = reader.history(&all()).expect("history");
         assert_eq!(history.len(), 1);
+        assert_eq!(history[0].error, pending.error);
         assert_eq!(
             history[0].status,
             JobStatus::Pending,
@@ -1923,4 +2008,140 @@ fn run_future_is_send() {
     assert_send(jobs.run(image_request()));
     assert_send(jobs.recover_pending());
     assert_send(jobs.balance_view(true));
+}
+
+#[tokio::test]
+async fn malformed_video_response_recovers_without_a_second_paid_request() {
+    const ID: &str = "78c93671-645f-40b9-bff3-9d120038a71a";
+    let server = MockServer::start().await;
+    let generation_path = format!("/v1/generations/{ID}");
+    Mock::given(method("POST"))
+        .and(path("/v1/videos/generations"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("x-ci-request-id", ID)
+                .insert_header("x-ci-billed-cost-usd", "0.125000")
+                .set_body_string("{"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let tmp = TempDir::new().unwrap();
+    let db = tmp.path().join("history.db");
+    let reader = Storage::open(&db).unwrap();
+    let (jobs, events) = jobs_with(
+        client_for(&server),
+        Storage::open(&db).unwrap(),
+        tmp.path().join("media"),
+    );
+    let err = jobs.run(video_request()).await.unwrap_err();
+    assert!(
+        matches!(&err, CoreError::Receipt {request_id, cost_usd: Some(cost), ..} if request_id == ID && *cost == 0.125)
+    );
+    let row = reader.history(&all()).unwrap().remove(0);
+    assert_eq!(row.status, JobStatus::Pending);
+    assert_eq!(row.request_id.as_deref(), Some(ID));
+    assert_eq!(row.cost_usd, Some(0.125));
+    assert_eq!(row.error.as_deref(), Some("history.recovery_response"));
+
+    // CI скрывает присутствие чужих файлов за generation_not_found. Правильный
+    // ключ всё ещё может вернуть тот же результат в течение семи дней.
+    for (status, code, note) in [
+        (403, "insufficient_scope", "history.recovery_access"),
+        (404, "generation_not_found", "history.recovery_not_found"),
+    ] {
+        let guard = Mock::given(method("GET"))
+            .and(path(&generation_path))
+            .respond_with(ResponseTemplate::new(status).set_body_json(json!({
+                "error": {"code":code, "message":"unavailable"}
+            })))
+            .expect(1)
+            .mount_as_scoped(&server)
+            .await;
+        let pending = jobs.recover_pending().await.unwrap().remove(0);
+        assert_eq!(pending.status, JobStatus::Pending);
+        assert_eq!(
+            reader.history(&all()).unwrap()[0].error.as_deref(),
+            Some(note)
+        );
+        drop(guard);
+    }
+
+    Mock::given(method("GET")).and(path(&generation_path))
+        .and(header("authorization", "Bearer ci_live_test"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object":"generation", "request_id": ID, "endpoint":"/v1/videos/generations",
+            "created_at":"2026-11-24T10:00:00Z", "expires_at":"2026-12-01T10:00:00Z",
+            "files":[{"index":0,"type":"video","content_type":"video/mp4","size_bytes":2,
+                "url":format!("{}/signed/output.mp4",server.uri()),"url_expires_at":"2026-11-26T11:00:00Z"}]
+        })))
+        .expect(2).mount(&server).await;
+    let expired_link = Mock::given(method("GET"))
+        .and(path("/signed/output.mp4"))
+        .respond_with(ResponseTemplate::new(410))
+        .expect(1)
+        .mount_as_scoped(&server)
+        .await;
+    let pending = jobs.recover_pending().await.unwrap().remove(0);
+    assert_eq!(pending.status, JobStatus::Pending);
+    assert_eq!(pending.error.as_deref(), Some("history.recovery_response"));
+    drop(expired_link);
+    Mock::given(method("GET"))
+        .and(path("/signed/output.mp4"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"hi"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let recovered = jobs.recover_pending().await.unwrap().remove(0);
+    assert_eq!(recovered.status, JobStatus::Completed);
+    assert_eq!(recovered.id, row.id);
+    assert_eq!(std::fs::read(&recovered.local_paths[0]).unwrap(), b"hi");
+    let stored = reader.history(&all()).unwrap();
+    assert_eq!(stored.len(), 1);
+    assert!(stored[0].error.is_none());
+    assert_eq!(
+        reader
+            .total_spend_usd(km_shared::Provider::CheaperInference)
+            .unwrap(),
+        0.125
+    );
+    assert!(matches!(
+        events.lock().unwrap().as_slice(),
+        [
+            AppEvent::GenerationStarted { .. },
+            AppEvent::GenerationDone { .. }
+        ]
+    ));
+}
+
+#[tokio::test]
+async fn inline_video_is_saved_when_billing_is_pending() {
+    const ID: &str = "0d2fb997-922c-4602-9feb-307eb73ef209";
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/videos/generations"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("x-request-id", ID)
+                .set_body_json(json!({
+                    "id":"provider-video-id", "status":"succeeded",
+                    "videos":[{"b64_video":"aGk="}],
+                    "billing":{"status":"pending","currency":"USD","billed_cost_usd":null}
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let tmp = TempDir::new().unwrap();
+    let (jobs, _) = jobs_with(
+        client_for(&server),
+        Storage::open_in_memory().unwrap(),
+        tmp.path().join("media"),
+    );
+    let rec = jobs.run(video_request()).await.unwrap();
+    assert_eq!(rec.status, JobStatus::Completed);
+    assert_eq!(rec.request_id.as_deref(), Some(ID));
+    assert_eq!(rec.cost_usd, None);
+    assert_eq!(std::fs::read(&rec.local_paths[0]).unwrap(), b"hi");
+    assert_eq!(received(&server).await.len(), 1);
 }

@@ -5,11 +5,12 @@
 //! Папка пересоздаётся при сохранении, если исчезла между запусками.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use km_shared::MediaKind;
+use tempfile::NamedTempFile;
 
 use crate::error::CoreError;
 
@@ -53,16 +54,52 @@ pub fn save_media(
     bytes: &[u8],
     content_type: &str,
 ) -> Result<PathBuf> {
+    save_at(
+        folder,
+        kind,
+        index,
+        total,
+        bytes,
+        content_type,
+        unix_millis(),
+    )
+}
+
+/// При коллизии выбираем следующий свободный номер миллисекунды; сохраняется
+/// существующий формат имени. persist_noclobber атомарно резервирует конечный
+/// путь между процессами. При сбое записи временный файл удаляется автоматически.
+fn save_at(
+    folder: &Path,
+    kind: MediaKind,
+    index: usize,
+    total: usize,
+    bytes: &[u8],
+    content_type: &str,
+    mut millis: u128,
+) -> Result<PathBuf> {
     ensure_folder(folder)?;
-    let path = folder.join(file_name(kind, index, total, content_type));
-    fs::write(&path, bytes).map_err(|e| {
-        // Io-ошибка сама по себе не несёт пути: добавляем его в сообщение.
-        CoreError::Io(io::Error::new(
-            e.kind(),
-            format!("не удалось записать файл {}: {e}", path.display()),
-        ))
-    })?;
-    Ok(path)
+    let mut temp = NamedTempFile::new_in(folder)?;
+    temp.write_all(bytes)?;
+    loop {
+        let path = folder.join(file_name(kind, index, total, content_type, millis));
+        match temp.persist_noclobber(&path) {
+            Ok(_) => return Ok(path),
+            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
+                temp = error.file;
+                millis += 1;
+            }
+            Err(error) => {
+                return Err(CoreError::Io(io::Error::new(
+                    error.error.kind(),
+                    format!(
+                        "не удалось сохранить файл {}: {}",
+                        path.display(),
+                        error.error
+                    ),
+                )));
+            }
+        }
+    }
 }
 
 /// Расширение файла по content-type; неизвестный тип даёт `bin`.
@@ -74,20 +111,31 @@ pub fn ext_for(content_type: &str) -> &'static str {
         "image/webp" => "webp",
         "image/gif" => "gif",
         "video/mp4" => "mp4",
-        "audio/mpeg" => "mp3",
-        "audio/wav" | "audio/x-wav" => "wav",
+        "audio/mpeg" | "audio/mp3" => "mp3",
+        "audio/wav" | "audio/x-wav" | "audio/wave" | "audio/vnd.wave" => "wav",
+        "audio/ogg" | "application/ogg" => "ogg",
+        "audio/opus" => "opus",
+        "audio/aac" | "audio/x-aac" => "aac",
+        "audio/flac" | "audio/x-flac" => "flac",
+        "audio/mp4" | "audio/x-m4a" => "m4a",
+        "audio/pcm" | "audio/l16" => "pcm",
         _ => "bin",
     }
 }
 
 /// Имя файла `<вид>-<unix_millis>[-N].<ext>`; суффикс только при `total > 1`.
-fn file_name(kind: MediaKind, index: usize, total: usize, content_type: &str) -> String {
+fn file_name(
+    kind: MediaKind,
+    index: usize,
+    total: usize,
+    content_type: &str,
+    millis: u128,
+) -> String {
     let (prefix, ext) = match kind {
         MediaKind::Image => ("image", ext_for(content_type)),
         MediaKind::Video => ("video", "mp4"),
         MediaKind::Audio => ("audio", ext_for(content_type)),
     };
-    let millis = unix_millis();
     if total > 1 {
         format!("{prefix}-{millis}-{}.{ext}", index + 1)
     } else {
@@ -101,4 +149,22 @@ fn unix_millis() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn colliding_saves_keep_each_payload_and_variant_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let save =
+            |bytes| save_at(dir.path(), MediaKind::Audio, 1, 2, bytes, "audio/mpeg", 123).unwrap();
+        let first = save(b"first");
+        let second = save(b"second");
+        assert_eq!(first, dir.path().join("audio-123-2.mp3"));
+        assert_eq!(second, dir.path().join("audio-124-2.mp3"));
+        assert_eq!(fs::read(first).unwrap(), b"first");
+        assert_eq!(fs::read(second).unwrap(), b"second");
+    }
 }

@@ -408,3 +408,66 @@ async fn download_network_error_redacts_query_token() {
         "путь должен остаться в сообщении: {message}"
     );
 }
+
+#[tokio::test]
+async fn large_video_json_uses_lossless_gzip_before_post() {
+    use std::io::Read;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/videos/generations"))
+        .and(wiremock::matchers::header("content-encoding", "gzip"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let data = json!({"input_references": ["A".repeat(km_shared::MAX_REQUEST_WIRE_BYTES)]});
+    let _: Value = client_for(&server)
+        .post_json("/v1/videos/generations", &data)
+        .await
+        .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    assert!(requests[0].body.len() < km_shared::MAX_REQUEST_WIRE_BYTES);
+    let mut decoded = Vec::new();
+    flate2::read::GzDecoder::new(requests[0].body.as_slice())
+        .read_to_end(&mut decoded)
+        .unwrap();
+    assert_eq!(decoded, serde_json::to_vec(&data).unwrap());
+}
+
+#[tokio::test]
+async fn media_json_above_decoded_limit_is_rejected_before_post() {
+    let server = MockServer::start().await;
+    let result = client_for(&server)
+        .post_json::<_, Value>("/v1/images/generations", &"A".repeat(20_000_000))
+        .await;
+    assert!(matches!(result, Err(CoreError::Validation(_))));
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn error_trace_uses_valid_body_id_or_white_label_header() {
+    for (body_id, expected) in [("body-id", "body-id"), ("bad/id", "header-id")] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .insert_header("x-request-id", "header-id")
+                    .set_body_json(json!({
+                        "request_id":body_id,
+                        "error":{"code":"server_error","message":"Unavailable"}
+                    })),
+            )
+            .mount(&server)
+            .await;
+        let error = client_for(&server)
+            .get_json::<Value>("/v1/models")
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .ends_with(&format!("[request_id: {expected}]"))
+        );
+    }
+}

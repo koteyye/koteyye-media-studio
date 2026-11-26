@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use km_shared::{
     AppEvent, BalanceView, GenMode, GenerationRequest, HistoryPatch, HistoryRecord, JobStatus,
-    MediaKind,
+    Lang, MediaKind,
 };
 use uuid::Uuid;
 
@@ -28,6 +28,8 @@ use crate::error::CoreError;
 use crate::files::save_media;
 use crate::images::image_bytes;
 use crate::storage::Storage;
+use crate::video::{safe_request_segment as is_safe_request_id, video_bytes};
+use km_shared::image::raster_mime;
 
 /// Результат операций оркестратора: ошибка ядра [`CoreError`].
 type Result<T> = std::result::Result<T, CoreError>;
@@ -94,10 +96,9 @@ impl Jobs {
     /// [`Jobs::recover_pending`] повторит скачивание. Для UI возвращается
     /// [`Err`], событие `GenerationFailed` не шлётся. Если `request_id` ещё
     /// не получен (сбой до ответа CI), запись переводится в `Failed`.
-    /// Definitive-ошибки (прочие 4xx, пустой результат) также переводят
-    /// в `Failed` с событием `GenerationFailed`. Видео в статусах
-    /// `processing`/`pending`/`in_progress` остаётся `Pending` с сохранённым
-    /// `request_id` — генерация ещё идёт на CI.
+    /// Некорректный успешный ответ с квитанцией оставляет возможность восстановления.
+    /// Видео в статусах `processing`/`pending`/`in_progress` с сохранённым
+    /// `request_id` возвращает запись `Pending`.
     ///
     /// # Errors
     ///
@@ -109,6 +110,7 @@ impl Jobs {
         let params_json =
             serde_json::to_string(&req).map_err(|e| CoreError::Serde(e.to_string()))?;
         let mut rec = HistoryRecord {
+            provider: km_shared::Provider::CheaperInference,
             id: Uuid::new_v4().to_string(),
             created_at: now,
             updated_at: now,
@@ -123,21 +125,34 @@ impl Jobs {
             params_json,
             error: None,
         };
-        self.storage.insert_history(&rec)?;
+        self.storage.begin_generation(&rec)?;
         (self.emit)(AppEvent::GenerationStarted {
             history_id: rec.id.clone(),
         });
 
         match self.produce_and_save(&mut rec, &req).await {
-            Ok(Produced::Completed(record)) => Ok(record),
-            Ok(Produced::InProgress { status }) => {
-                // request_id уже в БД: запись остаётся Pending, recovery
-                // подхватит её при следующем запуске. Для UI — ошибка.
-                Err(CoreError::Serde(format!(
-                    "CI вернул незавершённый статус видео: {status} (генерация ещё идёт)"
-                )))
-            }
+            Ok(record) => Ok(record),
             Err(err) => {
+                // Заголовки успешного POST уже дошли, даже если чтение тела оборвалось.
+                // Следующая попытка использует GET /generations/{id}, без второй оплаты.
+                if let CoreError::Receipt {
+                    request_id,
+                    cost_usd,
+                    ..
+                } = &err
+                    && is_safe_request_id(request_id)
+                {
+                    self.storage.update_history(
+                        &rec.id,
+                        &HistoryPatch {
+                            request_id: Some(request_id.clone()),
+                            cost_usd: *cost_usd,
+                            error: Some("history.recovery_response".into()),
+                            ..HistoryPatch::default()
+                        },
+                    )?;
+                    return Err(err);
+                }
                 // Транзиентный сбой после фиксации request_id не сжигает
                 // запись: оплаченная генерация жива на CI, повторит recovery.
                 if is_transient(&err) && rec.request_id.is_some() {
@@ -157,9 +172,8 @@ impl Jobs {
     /// без `request_id` (ответ CI не был получен) — `Failed`. Транзиентные
     /// ошибки (сеть, таймаут, ввод-вывод, БД, HTTP 5xx/429) оставляют запись
     /// `Pending`: файлы живут на CI 7 дней, генерация восстановится при
-    /// следующем запуске. Definitive-ответы CI (404/410, пустой результат)
-    /// переводят в `Failed`; если сам `Failed` не записался из-за сбоя БД,
-    /// запись тоже остаётся `Pending`.
+    /// следующем запуске. Если текущий ключ не может получить результат,
+    /// причина остаётся в истории. Ответ 410 означает, что срок хранения истёк.
     /// Сбой хранилища на одной записи логируется и не прерывает остальные.
     /// Возвращает обработанные записи с итоговым статусом (оставшиеся
     /// `Pending` — как есть). События `GenerationDone`/`GenerationFailed`
@@ -170,7 +184,9 @@ impl Jobs {
     /// [`CoreError::Db`] / [`CoreError::Serde`], если не удалось прочитать
     /// хранилище; ошибки отдельных записей не прерывают восстановление.
     pub async fn recover_pending(&self) -> Result<Vec<HistoryRecord>> {
-        let pending = self.storage.pending()?;
+        let pending = self
+            .storage
+            .pending_for(km_shared::Provider::CheaperInference)?;
         let mut updated = Vec::with_capacity(pending.len());
         for rec in pending {
             match self.recover_one(&rec).await {
@@ -190,22 +206,19 @@ impl Jobs {
     /// При `show_real = true` запрашивается [`CiClient::balance`]; 403
     /// ([`CoreError::ScopeMissing`]) или любая ошибка CI дают `real = None` —
     /// фолбэк на локальный расход. При `show_real = false` запрос не идёт.
-    /// `local_spend_usd` — сумма стоимостей по всей истории из [`Storage`].
+    /// `local_spend_usd` — сумма известных списаний CI из [`Storage`].
     ///
     /// # Errors
     ///
-    /// [`CoreError::Db`], если не удалось агрегировать расход; ошибка запроса
-    /// баланса не пробрасывается (скрывает реальный баланс, оставляя локальный).
+    /// [`CoreError::Db`], если не удалось агрегировать расход; ошибки чтения удалённого кошелька
+    /// сохраняются в BalanceView и не мешают показать локальный расход.
     pub async fn balance_view(&self, show_real: bool) -> Result<BalanceView> {
-        let local_spend_usd = self.storage.total_spend_usd()?;
-        let real = if show_real {
-            self.client.balance().await.ok()
+        let provider = km_shared::Provider::CheaperInference;
+        let local_spend_usd = self.storage.total_spend_usd(provider)?;
+        Ok(if show_real {
+            self.client.balance_view(local_spend_usd).await
         } else {
-            None
-        };
-        Ok(BalanceView {
-            real,
-            local_spend_usd,
+            BalanceView::local(provider, local_spend_usd)
         })
     }
 
@@ -214,7 +227,7 @@ impl Jobs {
         &self,
         rec: &mut HistoryRecord,
         req: &GenerationRequest,
-    ) -> Result<Produced> {
+    ) -> Result<HistoryRecord> {
         match self.generate(rec, req).await? {
             Generated::Ready {
                 request_id,
@@ -222,11 +235,41 @@ impl Jobs {
                 files,
             } => {
                 let local_paths = self.save_files(req.kind, &files)?;
-                let record = self.complete(rec, request_id, local_paths, cost_usd)?;
-                Ok(Produced::Completed(record))
+                self.complete(rec, request_id, local_paths, cost_usd)
             }
-            Generated::InProgress { status } => Ok(Produced::InProgress { status }),
+            Generated::InProgress => {
+                rec.error = Some("history.video_processing".to_owned());
+                self.storage.update_history(
+                    &rec.id,
+                    &HistoryPatch {
+                        error: rec.error.clone(),
+                        ..Default::default()
+                    },
+                )?;
+                Ok(rec.clone())
+            }
         }
+    }
+
+    /// Одинаковая диагностика в ответе команды, истории и событии о сбое.
+    fn explain_edit_error(&self, mut err: CoreError, model: &str) -> CoreError {
+        if let CoreError::Http {
+            status: 500..=599,
+            message,
+            ..
+        } = &mut err
+        {
+            let lang = self.storage.get_settings().map_or(Lang::Ru, |s| s.lang);
+            *message = match lang {
+                Lang::Ru => format!(
+                    "Шлюз Cheaper Inference не смог обработать референс для модели «{model}». {message}"
+                ),
+                Lang::En => format!(
+                    "Cheaper Inference could not process the reference with {model}. {message}"
+                ),
+            };
+        }
+        err
     }
 
     /// Вызывает клиент по виду медиа и собирает байты файлов со стоимостью.
@@ -245,25 +288,32 @@ impl Jobs {
         match req.kind {
             MediaKind::Image => {
                 let response = match req.mode {
-                    GenMode::ImageEdit => self.client.edit_image(req).await?,
+                    GenMode::ImageEdit => self
+                        .client
+                        .edit_image(req)
+                        .await
+                        .map_err(|err| self.explain_edit_error(err, &req.model))?,
                     _ => self.client.generate_image(req).await?,
                 };
-                if response.data.is_empty() {
-                    return Err(CoreError::Serde(
-                        "CI вернул пустой результат: data".to_owned(),
-                    ));
-                }
                 let cost_usd = response.billing.as_ref().and_then(|b| b.cost_usd());
                 self.set_request_id_and_cost(&rec.id, response.request_id.as_deref(), cost_usd)?;
                 rec.request_id = response.request_id.clone();
                 rec.cost_usd = cost_usd;
+                if response.data.is_empty() {
+                    return Err(media_receipt_error(
+                        rec,
+                        CoreError::Serde("CI вернул пустой результат: data".to_owned()),
+                    ));
+                }
                 let mut files = Vec::with_capacity(response.data.len());
                 for item in &response.data {
-                    let bytes = image_bytes(item, &self.client).await?;
-                    let content_type = item
-                        .content_type
-                        .clone()
-                        .unwrap_or_else(|| DEFAULT_IMAGE_CONTENT_TYPE.to_owned());
+                    let bytes = image_bytes(item, &self.client)
+                        .await
+                        .map_err(|source| media_receipt_error(rec, source))?;
+                    let content_type = raster_mime(&bytes)
+                        .or(item.content_type.as_deref())
+                        .unwrap_or(DEFAULT_IMAGE_CONTENT_TYPE)
+                        .to_owned();
                     files.push(MediaBytes {
                         bytes,
                         content_type,
@@ -277,13 +327,15 @@ impl Jobs {
             }
             MediaKind::Audio => {
                 let output = self.client.speech(req).await?;
-                if output.bytes.is_empty() {
-                    return Err(CoreError::Serde(
-                        "CI вернул пустой результат: аудио".to_owned(),
-                    ));
-                }
+                self.set_request_id_and_cost(
+                    &rec.id,
+                    output.request_id.as_deref(),
+                    output.cost_usd,
+                )?;
+                rec.request_id = output.request_id.clone();
+                rec.cost_usd = output.cost_usd;
                 Ok(Generated::Ready {
-                    request_id: None,
+                    request_id: output.request_id,
                     cost_usd: output.cost_usd,
                     files: vec![MediaBytes {
                         bytes: output.bytes,
@@ -304,16 +356,16 @@ impl Jobs {
                     // CI документирует completed/succeeded как успешные статусы.
                     "completed" | "succeeded" => {
                         if response.videos.is_empty() {
-                            return Err(CoreError::Serde(
-                                "CI вернул пустой результат: videos".to_owned(),
+                            return Err(media_receipt_error(
+                                rec,
+                                CoreError::Serde("CI вернул пустой результат: videos".to_owned()),
                             ));
                         }
                         let mut files = Vec::with_capacity(response.videos.len());
                         for item in &response.videos {
-                            let Some(url) = &item.url else {
-                                return Err(CoreError::Serde("элемент видео без url".to_owned()));
-                            };
-                            let bytes = self.video_download.download(url).await?;
+                            let bytes = video_bytes(item, &self.video_download)
+                                .await
+                                .map_err(|source| media_receipt_error(rec, source))?;
                             let content_type = item
                                 .content_type
                                 .clone()
@@ -331,9 +383,11 @@ impl Jobs {
                     }
                     // Генерация ещё идёт: запись остаётся Pending с request_id,
                     // recovery заберёт файлы, когда CI завершит задание.
-                    "processing" | "pending" | "in_progress" => Ok(Generated::InProgress {
-                        status: response.status.clone(),
-                    }),
+                    "processing" | "pending" | "in_progress"
+                        if rec.request_id.as_deref().is_some_and(is_safe_request_id) =>
+                    {
+                        Ok(Generated::InProgress)
+                    }
                     // Definitive-статусы (failed, cancelled, …) — ошибка.
                     other => Err(CoreError::Serde(format!(
                         "CI вернул незавершённый статус видео: {other}"
@@ -376,11 +430,27 @@ impl Jobs {
         };
         match self.fetch_and_save(rec, request_id).await {
             Ok(record) => Ok(record),
-            Err(err) if is_transient(&err) => {
-                eprintln!("восстановление записи {} отложено: {err}", rec.id);
-                Ok(rec.clone())
+            Err(err) => {
+                if let Some(note) = recovery_note(&err, rec) {
+                    let mut record = rec.clone();
+                    if record.error.as_deref() != Some(note) {
+                        record.error = Some(note.to_owned());
+                        self.storage.update_history(
+                            &rec.id,
+                            &HistoryPatch {
+                                error: record.error.clone(),
+                                ..HistoryPatch::default()
+                            },
+                        )?;
+                    }
+                    Ok(record)
+                } else if is_transient(&err) {
+                    eprintln!("восстановление записи {} отложено: {err}", rec.id);
+                    Ok(rec.clone())
+                } else {
+                    self.fail_or_keep_pending(rec, err.to_string())
+                }
             }
-            Err(err) => self.fail_or_keep_pending(rec, err.to_string()),
         }
     }
 
@@ -407,14 +477,31 @@ impl Jobs {
                 "CI вернул пустой результат: files".to_owned(),
             ));
         }
-        let total = generation.files.len();
-        let mut local_paths = Vec::with_capacity(total);
-        for (index, file) in generation.files.iter().enumerate() {
-            let bytes = self.download_for(rec.kind, &file.url).await?;
-            let content_type = normalize_content_type(&file.content_type);
-            let path = save_media(&self.folder, rec.kind, index, total, &bytes, &content_type)?;
-            local_paths.push(path.to_string_lossy().into_owned());
+        let mut files = Vec::with_capacity(generation.files.len());
+        for file in generation.files {
+            let bytes = self
+                .download_for(rec.kind, &file.url)
+                .await
+                .map_err(|err| match err {
+                    // Срок жизни подписанной ссылки — час. Новый GET даст свежую ссылку,
+                    // даже если предыдущая успела истечь в процессе загрузки нескольких файлов.
+                    CoreError::Http {
+                        status: 401 | 403 | 404 | 410,
+                        ..
+                    } => CoreError::Serde("подписанная ссылка на файл недоступна".into()),
+                    other => other,
+                })?;
+            if bytes.is_empty() || bytes.len() as u64 != file.size_bytes {
+                return Err(CoreError::Serde(
+                    "размер загруженного файла не совпадает с ответом CI".into(),
+                ));
+            }
+            files.push(MediaBytes {
+                bytes,
+                content_type: file.content_type,
+            });
         }
+        let local_paths = self.save_files(rec.kind, &files)?;
         // request_id и стоимость не меняем: оба зафиксированы в БД сразу после
         // ответа CI (recovery-эндпоинт billing не отдаёт) — восстановление
         // завершает запись с оплаченной ценой, не теряя её.
@@ -532,15 +619,7 @@ enum Generated {
         files: Vec<MediaBytes>,
     },
     /// Видео ещё генерируется на CI (статус ответа); `request_id` уже в БД.
-    InProgress { status: String },
-}
-
-/// Исход [`Jobs::produce_and_save`]: запись завершена или генерация ещё идёт.
-enum Produced {
-    /// Файлы сохранены, запись переведена в `Completed`.
-    Completed(HistoryRecord),
-    /// Видео ещё генерируется (статус CI); запись остаётся `Pending`.
-    InProgress { status: String },
+    InProgress,
 }
 
 /// Байты одного медиа-файла и его MIME-тип до нормализации.
@@ -576,7 +655,8 @@ fn normalize_content_type(content_type: &str) -> String {
 fn is_transient(err: &CoreError) -> bool {
     match err {
         CoreError::Network(_) | CoreError::Timeout | CoreError::Io(_) | CoreError::Db(_) => true,
-        CoreError::Http { status, .. } => matches!(status, 500..=599 | 429),
+        CoreError::Http { status, .. } => matches!(status, 500..=599 | 408 | 425 | 429),
+        CoreError::Receipt { request_id, .. } => is_safe_request_id(request_id),
         CoreError::ScopeMissing
         | CoreError::NoKey
         | CoreError::Serde(_)
@@ -584,15 +664,44 @@ fn is_transient(err: &CoreError) -> bool {
     }
 }
 
-/// Допустим ли `request_id` для подстановки в URL recovery-эндпоинта.
-///
-/// Defense-in-depth: только непустые ASCII-буквы/цифры, `-` и `_` (UUID и id
-/// CI); служебные символы (`/`, `?`, `..`) не попадают в путь запроса.
-fn is_safe_request_id(request_id: &str) -> bool {
-    !request_id.is_empty()
-        && request_id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+fn media_receipt_error(record: &HistoryRecord, source: CoreError) -> CoreError {
+    if is_transient(&source) {
+        return source;
+    }
+    match record
+        .request_id
+        .as_ref()
+        .filter(|id| is_safe_request_id(id))
+    {
+        Some(id) => CoreError::Receipt {
+            request_id: id.clone(),
+            cost_usd: record.cost_usd,
+            source: Box::new(source),
+        },
+        None => source,
+    }
+}
+
+/// Права текущего ключа и доступ к кошельку можно исправить. Один и тот же 404
+/// generation_not_found также маскирует чужого владельца: исходный ключ может
+/// вернуть файл в пределах объявленных семи дней. 410 окончательно означает истечение срока.
+fn recovery_note(err: &CoreError, record: &HistoryRecord) -> Option<&'static str> {
+    match err {
+        CoreError::Serde(_) => Some("history.recovery_response"),
+        CoreError::NoKey
+        | CoreError::ScopeMissing
+        | CoreError::Http {
+            status: 401..=403, ..
+        } => Some("history.recovery_access"),
+        CoreError::Http {
+            status: 404,
+            code: Some(code),
+            ..
+        } if code == "generation_not_found" => now_unix_secs()
+            .is_ok_and(|now| now.saturating_sub(record.created_at) < 7 * 24 * 60 * 60)
+            .then_some("history.recovery_not_found"),
+        _ => None,
+    }
 }
 
 /// Текущий момент как Unix-время в секундах — единица `created_at`/`updated_at`.

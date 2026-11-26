@@ -1,3 +1,5 @@
+@import url("./studio-controls.css");
+
 /* Стили Koteyye Media Studio: темы, layout сайдбара, настройки, онбординг.
    Токены тем в рантайме задаёт km_ui_core::theme_vars (<style> в корне App);
    значения :root ниже — фолбэк до загрузки WASM (светлая тема «Воздух»). */
@@ -10,6 +12,7 @@
   --text-muted: #6b7280;
   --accent: #e05616;
   --accent-hover: #ff7333;
+  --accent-text: #ae390b;
   --on-accent: #1a0d05;
   color-scheme: light;
 }
@@ -37,6 +40,9 @@ body {
 }
 
 .sidebar {
+  position: sticky;
+  top: 0;
+  height: 100vh;
   width: 220px;
   flex-shrink: 0;
   display: flex;
@@ -48,6 +54,9 @@ body {
 }
 
 .sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   padding: 4px 8px;
   font-size: 15px;
   font-weight: 700;
@@ -78,7 +87,7 @@ body {
 /* Активный пункт — акцент #e05616 (active_class роутера). */
 .nav-item.active {
   background: var(--bg);
-  color: var(--accent);
+  color: var(--accent-text);
   font-weight: 600;
 }
 
@@ -126,7 +135,7 @@ body {
   border: 1px solid var(--accent);
   border-radius: 8px;
   font-size: 14px;
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .error-banner-text {
@@ -139,14 +148,14 @@ body {
   padding: 0 4px;
   border: none;
   background: none;
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: 16px;
   line-height: 1;
   cursor: pointer;
 }
 
 .banner-dismiss:hover {
-  color: var(--accent-hover);
+  color: var(--text);
 }
 
 /* Экран настроек: секции с полями (ключ, папка, язык, тема, баланс). */
@@ -208,7 +217,7 @@ body {
 
 .btn:hover:not(:disabled) {
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .btn:disabled {
@@ -239,7 +248,7 @@ body {
 }
 
 .status-error {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .status-muted {
@@ -371,7 +380,7 @@ body {
   border: 1px solid var(--accent);
   border-radius: 8px;
   font-size: 13px;
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .onboarding-summary {
@@ -385,4 +394,141 @@ body {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 8px;
+}
+
+button, input, textarea, select { font-family: inherit; }
+:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 3px; }
+a { color: var(--accent-text); }
+.key-delete { align-self: flex-start; }
+.studio { display: grid; gap: 22px; max-width: 1120px; }
+.studio h1 { margin: 0; }
+.mode-tabs, .history-filters {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding: 3px;
+  gap: 3px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.mode-tab, .history-filters .btn {
+  padding: 8px 14px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.mode-tab[aria-pressed="true"], .history-filters [aria-pressed="true"] {
+  color: var(--accent-text);
+  background: var(--bg);
+  border-color: var(--border);
+  font-weight: 600;
+}
+.studio-form, .studio-result, .history-list {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+}
+.studio-form { display: grid; gap: 14px; padding: 22px; }
+.studio-prompt {
+  width: 100%;
+  min-height: 112px;
+  resize: vertical;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  background: var(--bg);
+  font-size: 16px;
+  line-height: 1.5;
+}
+.studio-controls, .studio-submit, .studio-uploads, .reference-list,
+.media-actions, .history-actions, .history-confirm, .history-meta, .history-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.studio-submit { padding-top: 14px; border-top: 1px solid var(--border); }
+.studio-submit .btn-primary { padding: 10px 22px; font-weight: 600; }
+.studio-upload-slot { min-width: 160px; flex: 1; }
+.reference-preview { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; }
+.reference-preview img, .history-thumb {
+  width: 48px;
+  height: 48px;
+  border-radius: 6px;
+  object-fit: cover;
+}
+.studio-result { padding: 20px; }
+.media-result { display: grid; gap: 12px; }
+.media-file { margin: 0; min-width: 0; }
+.media-stage {
+  display: block;
+  width: 100%;
+  max-height: 65vh;
+  object-fit: contain;
+  border-radius: 10px;
+  background: var(--bg);
+}
+.media-actions { margin-top: 10px; }
+.media-filename {
+  color: var(--text-muted);
+  margin-right: auto;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+.audio-wave { width: 100%; height: 72px; color: var(--accent-text); }
+.media-audio { width: 100%; }
+.recent-items { display: flex; gap: 10px; overflow-x: auto; padding: 2px 2px 10px; }
+.recent-item, .history-entry {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.recent-item {
+  flex: 0 0 180px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.recent-item > span:last-child, .history-entry > span:last-child {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.history-toolbar { margin: 20px 0 16px; justify-content: space-between; }
+.history-toolbar input { max-width: 320px; }
+.history-list { overflow-x: auto; }
+.history-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.history-table th, .history-table td { padding: 12px 8px; text-align: left; }
+.history-table th { color: var(--text-muted); background: var(--bg); font-weight: 600; }
+.history-table td { border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+.history-entry { padding: 0; border: 0; min-width: 115px; }
+.history-thumb {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text-muted);
+}
+.history-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.history-actions { flex-wrap: nowrap; gap: 4px; }
+.history-actions .btn { padding: 5px 8px; }
+.history-detail { background: var(--bg); }
+.history-meta, .history-status { font-size: 13px; color: var(--text-muted); }
+.empty-state { padding: 28px 0; }
+@media (max-width: 1040px) {
+  .sidebar { width: 176px; }
+  .content { padding: 22px 18px; }
+  .history-actions { flex-wrap: wrap; }
 }

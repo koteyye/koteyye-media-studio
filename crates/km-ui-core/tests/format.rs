@@ -3,7 +3,24 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use km_shared::Lang::{En, Ru};
-use km_ui_core::format::{format_date, format_date_at, format_duration, format_usd};
+use km_ui_core::format::{
+    format_date, format_date_at, format_duration, format_local_date_at, format_usd,
+};
+
+#[test]
+fn local_date_uses_each_instants_offset_including_dst() {
+    // 26 ноября 01:39 и 12:00 в Москве. В UTC запись попадает на предыдущий день.
+    assert_eq!(
+        format_local_date_at(1_795_646_342, 1_795_683_600, -180, -180, Ru),
+        "сегодня"
+    );
+    assert_eq!(format_date_at(1_795_646_342, 1_795_683_600, Ru), "вчера");
+    // Нью-Йорк: 9 марта 23:30 EST и 10 марта 12:00 EDT.
+    assert_eq!(
+        format_local_date_at(1_710_045_000, 1_710_086_400, 300, 240, En),
+        "yesterday"
+    );
+}
 
 /// 2026-11-20T00:00:00Z (день 20777 от Unix-эпохи).
 const NOV_20_2026: i64 = 1_795_132_800;

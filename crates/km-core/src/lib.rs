@@ -27,7 +27,7 @@ mod storage;
 mod video;
 
 pub use catalog::{CatalogCache, by_kind, for_mode};
-pub use client::CiClient;
+pub use client::{CiClient, OpenRouterKeyClient};
 pub use error::CoreError;
 pub use files::{ensure_folder, ext_for, save_media};
 pub use images::image_bytes;

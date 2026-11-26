@@ -1,6 +1,6 @@
 //! Маршруты приложения: Studio (вид медиа), History, Settings, Onboarding.
 //!
-//! `/` редиректится в Studio с `kind=image`. Studio/History/Settings рендерятся
+//! `/` открывает стартовый или последний раздел. Studio/History/Settings рендерятся
 //! внутри [`Layout`] (сайдбар + контент), Onboarding — отдельный экран без сайдбара.
 //! Параметр `kind` — строка маршрута (`image`/`video`/`audio`); в тип
 //! [`MediaKind`] её переводит [`parse_kind`].
@@ -15,7 +15,8 @@ use crate::screens::{History, Onboarding, Settings, Studio};
 #[derive(Clone, Debug, PartialEq, Routable)]
 pub enum Route {
     #[layout(Layout)]
-    #[redirect("/", || Route::Studio { kind: "image".to_owned() })]
+    #[route("/")]
+    Home {},
     #[route("/studio/:kind")]
     Studio {
         /// Вид медиа: `image`, `video` или `audio`.
@@ -28,6 +29,36 @@ pub enum Route {
     #[end_layout]
     #[route("/onboarding")]
     Onboarding {},
+}
+
+/// Главная точка входа ждёт выбора из SQLite. Прямые ссылки открываются как обычно.
+#[component]
+fn Home() -> Element {
+    let state = use_context::<crate::state::AppState>();
+    let nav = use_navigator();
+    use_effect(move || {
+        if *state.settings_ready.read() || !*state.busy.read() {
+            let settings = state.settings.peek();
+            let kind = settings
+                .workspace
+                .startup
+                .unwrap_or(settings.workspace.last_kind);
+            nav.replace(Route::studio(kind));
+        }
+    });
+    let loading = crate::state::use_t("common.loading");
+    rsx! { p { class: "muted", role: "status", {loading} } }
+}
+
+impl Route {
+    pub fn studio(kind: MediaKind) -> Self {
+        let slug = match kind {
+            MediaKind::Image => "image",
+            MediaKind::Video => "video",
+            MediaKind::Audio => "audio",
+        };
+        Self::Studio { kind: slug.into() }
+    }
 }
 
 /// Переводит строковый параметр маршрута в [`MediaKind`].
@@ -78,12 +109,7 @@ mod tests {
     }
 
     #[test]
-    fn root_redirects_to_studio_image() {
-        assert_eq!(
-            Route::from_str("/").unwrap(),
-            Route::Studio {
-                kind: "image".to_owned()
-            }
-        );
+    fn root_opens_the_saved_workspace() {
+        assert_eq!(Route::from_str("/").unwrap(), Route::Home {});
     }
 }

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Базовые разрешения главного окна: ядро Tauri (события), управление окнами, диалог выбора папки. Opener используется только из Rust-команд (path safety), JS-разрешения ему не выдаются.",
+  "description": "Главное окно подписывается на события. Выбор папки и открытие файлов выполняют Rust-команды.",
   "windows": ["main"],
-  "permissions": ["core:default", "core:window:default", "dialog:allow-open"]
+  "permissions": ["core:event:allow-listen"]
 }

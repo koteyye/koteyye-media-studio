@@ -25,6 +25,7 @@ pub fn App() -> Element {
 
     // Однократная инициализация: внутри нет реактивных чтений — эффект не перезапускается.
     use_effect(move || state.init());
+    use_effect(move || state.watch_choices());
 
     // Реактивное применение темы: чтения сигналов подписывают эффект на их смену.
     use_effect(move || {
@@ -50,6 +51,10 @@ pub fn App() -> Element {
 
     let resolved = resolve_theme((state.theme)(), (state.system_dark)());
     rsx! {
+        document::Stylesheet { href: asset!("/assets/app-workspace.css") }
+        document::Stylesheet { href: asset!("/assets/generator-workspace.css") }
+        document::Stylesheet { href: asset!("/assets/settings-workspace.css") }
+        document::Link { rel: "icon", href: asset!("/assets/icons/frame-16.png"), r#type: "image/png" }
         style { ":root {{ {theme_vars(resolved)} }}" }
         Router::<Route> {
             config: move || {

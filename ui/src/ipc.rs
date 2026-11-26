@@ -1,6 +1,6 @@
 //! Типизированный IPC-биндинг UI к Tauri: команды ядра и события.
 //!
-//! 13 обёрток над командами `src-tauri` (типы [`km_shared`] на входе и выходе)
+//! Обёртки над командами `src-tauri` (типы [`km_shared`] на входе и выходе)
 //! и подписка [`on_event`] на `generation:started/done/failed`, `balance:updated`.
 //! Аргументы — serde JSON с camelCase-ключами (`settings`, `key`, `kind`, `req`,
 //! `filter`, `id`, `path`); ошибки IPC и разбора приводятся к `String` для UI.
@@ -18,7 +18,7 @@ use std::rc::Rc;
 
 use km_shared::{
     AppEvent, BalanceView, CatalogModel, GenerationRequest, HistoryFilter, HistoryRecord,
-    MediaKind, Settings,
+    MediaKind, Provider, Settings, UpdateStatus,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -37,6 +37,10 @@ export async function invoke(cmd, argsJson) {
     }
     const result = await internals.invoke(cmd, JSON.parse(argsJson));
     return JSON.stringify(result);
+}
+
+export function mediaUrl(path) {
+    return window.__TAURI_INTERNALS__.convertFileSrc(path, "asset");
 }
 
 export function listen(event, callback) {
@@ -59,9 +63,16 @@ export function listen(event, callback) {
     extern "C" {
         /// Вызов Tauri-команды: ответ — JSON-строка, reject promise — ошибка.
         pub(super) fn invoke(cmd: &str, args_json: &str) -> js_sys::Promise;
+        #[wasm_bindgen(js_name = mediaUrl)]
+        pub(super) fn media_url(path: &str) -> String;
         /// Подписка на событие ядра; callback получает payload JSON-строкой.
         pub(super) fn listen(event: &str, callback: &Closure<dyn Fn(String)>);
     }
+}
+
+/// URL локального результата для img/video/audio (с учётом платформы и экранирования).
+pub fn media_url(path: &str) -> String {
+    glue::media_url(path)
 }
 
 /// Вызывает Tauri-команду и десериализует JSON-ответ в тип `T`.
@@ -156,6 +167,30 @@ pub async fn set_api_key(key: &str) -> Result<(), String> {
     invoke_command("set_api_key", api_key_args(key)).await
 }
 
+pub async fn provider_has_key(provider: Provider) -> Result<bool, String> {
+    invoke_command("provider_has_key", json!({ "provider": provider })).await
+}
+
+pub async fn set_provider_key(provider: Provider, key: &str) -> Result<(), String> {
+    invoke_command(
+        "set_provider_key",
+        json!({ "provider": provider, "key": key }),
+    )
+    .await
+}
+
+pub async fn check_provider_key(provider: Provider, key: Option<&str>) -> Result<bool, String> {
+    invoke_command(
+        "check_provider_key",
+        json!({ "provider": provider, "key": key }),
+    )
+    .await
+}
+
+pub async fn result_reference(id: &str, index: usize) -> Result<String, String> {
+    invoke_command("result_reference", json!({ "id": id, "index": index })).await
+}
+
 /// Проверка подключения к Cheaper Inference.
 ///
 /// `true` — ключ принят, `false` — ключа нет или CI ответил 401.
@@ -164,8 +199,8 @@ pub async fn set_api_key(key: &str) -> Result<(), String> {
 ///
 /// Строка с причиной при ошибках, отличных от 401 (сеть, 5xx), и при сбое
 /// чтения keychain: подключение не проверено, редиректа в онбординг нет.
-pub async fn test_connection() -> Result<bool, String> {
-    invoke_command("test_connection", json!({})).await
+pub async fn test_connection(key: Option<&str>) -> Result<bool, String> {
+    invoke_command("test_connection", json!({ "key": key })).await
 }
 
 /// Каталог моделей по виду медиа; без ключа — публичный каталог.
@@ -177,6 +212,16 @@ pub async fn fetch_models(kind: MediaKind) -> Result<Vec<CatalogModel>, String> 
     invoke_command("fetch_models", models_args(kind)).await
 }
 
+/// Проверяет версию подписанного обновления без скачивания установщика.
+pub async fn check_update() -> Result<UpdateStatus, String> {
+    invoke_command("check_update", json!({})).await
+}
+
+/// Скачивает проверенное обновление по явному выбору пользователя.
+pub async fn install_update(version: &str) -> Result<(), String> {
+    invoke_command("install_update", json!({ "version": version })).await
+}
+
 /// Запуск генерации; после успеха ядро шлёт событие `balance:updated`.
 ///
 /// # Errors
@@ -184,6 +229,13 @@ pub async fn fetch_models(kind: MediaKind) -> Result<Vec<CatalogModel>, String> 
 /// Строка с причиной: нет ключа, не задана папка сохранения, ошибки ядра.
 pub async fn generate(req: &GenerationRequest) -> Result<HistoryRecord, String> {
     invoke_command("generate", generate_args(req)).await
+}
+
+pub async fn generate_for(
+    provider: Provider,
+    req: &GenerationRequest,
+) -> Result<HistoryRecord, String> {
+    invoke_command("generate", json!({ "provider": provider, "req": req })).await
 }
 
 /// Список истории с фильтром, новые первыми.
@@ -216,13 +268,13 @@ pub async fn recover_pending() -> Result<Vec<HistoryRecord>, String> {
     invoke_command("recover_pending", json!({})).await
 }
 
-/// Гибридный баланс: реальный из CI (если включён) плюс локальный расход.
+/// Локальный расход выбранного провайдера и, если включено, его баланс аккаунта.
 ///
 /// # Errors
 ///
 /// Строка с причиной при сбое хранилища или запроса баланса.
-pub async fn fetch_balance() -> Result<BalanceView, String> {
-    invoke_command("fetch_balance", json!({})).await
+pub async fn fetch_balance(provider: Provider) -> Result<BalanceView, String> {
+    invoke_command("fetch_balance", json!({ "provider": provider })).await
 }
 
 /// Выбор папки сохранения в нативном диалоге; `None` — пользователь отменил.
@@ -300,6 +352,7 @@ mod tests {
             lang: Lang::Ru,
             theme: Theme::Dark,
             show_real_balance: true,
+            ..Settings::default()
         }
     }
 

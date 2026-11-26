@@ -7,21 +7,22 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use km_core::Storage;
+use km_core::{OpenRouterKeyClient, Storage};
 use km_shared::{
-    AppEvent, GenMode, GenerationRequest, HistoryFilter, HistoryRecord, JobStatus, Lang, MediaKind,
-    Settings, Theme,
+    AppEvent, BalanceUnavailable, GenMode, GenerationRequest, HistoryFilter, HistoryRecord,
+    JobStatus, Lang, MediaKind, Provider, Settings, Theme,
 };
 use koteyye_media_studio::commands::{
-    cmd_delete_history, cmd_fetch_balance, cmd_fetch_models, cmd_generate, cmd_get_settings,
-    cmd_list_history, cmd_open_file, cmd_recover_pending, cmd_set_api_key, cmd_set_settings,
-    cmd_show_in_folder, cmd_test_connection, event_name,
+    cmd_check_provider_key, cmd_delete_history, cmd_fetch_balance, cmd_fetch_balance_for,
+    cmd_fetch_models, cmd_generate, cmd_generate_for, cmd_get_settings, cmd_list_history,
+    cmd_open_file, cmd_provider_has_key, cmd_recover_pending, cmd_set_api_key,
+    cmd_set_provider_key, cmd_set_settings, cmd_show_in_folder, cmd_test_connection, event_name,
 };
 use koteyye_media_studio::keychain::{InMemoryKeyStore, KeyStore};
 use koteyye_media_studio::state::AppState;
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// Эмиттер событий ядра (в тестах — запись в коллектор).
@@ -32,15 +33,15 @@ type EventEmitter = Arc<dyn Fn(AppEvent) + Send + Sync>;
 struct UnreadableKeyStore;
 
 impl KeyStore for UnreadableKeyStore {
-    fn get(&self) -> Result<Option<String>, String> {
+    fn get(&self, _provider: Provider) -> Result<Option<String>, String> {
         Err("не удалось прочитать ключ из keychain: доступ запрещён".to_owned())
     }
 
-    fn set(&self, _key: &str) -> Result<(), String> {
+    fn set(&self, _provider: Provider, _key: &str) -> Result<(), String> {
         Ok(())
     }
 
-    fn delete(&self) -> Result<(), String> {
+    fn delete(&self, _provider: Provider) -> Result<(), String> {
         Ok(())
     }
 }
@@ -62,7 +63,9 @@ fn collector() -> (EventEmitter, EventLog) {
 fn state_for(server: &MockServer, tmp: &TempDir, key: Option<&str>) -> (AppState, EventLog) {
     let key_store = InMemoryKeyStore::default();
     if let Some(key) = key {
-        key_store.set(key).expect("ключ должен сохраниться");
+        key_store
+            .set(Provider::CheaperInference, key)
+            .expect("ключ должен сохраниться");
     }
     let (emit, events) = collector();
     let state = AppState::new(
@@ -84,6 +87,7 @@ fn with_folder(state: &AppState, tmp: &TempDir) -> PathBuf {
         lang: Lang::Ru,
         theme: Theme::System,
         show_real_balance: false,
+        ..Settings::default()
     };
     state
         .storage
@@ -108,6 +112,7 @@ fn image_request() -> GenerationRequest {
 /// Базовая запись истории для recover/list-сценариев.
 fn history_record(id: &str, status: JobStatus) -> HistoryRecord {
     HistoryRecord {
+        provider: Provider::CheaperInference,
         id: id.to_owned(),
         created_at: 1_700_000_000,
         updated_at: 1_700_000_000,
@@ -382,6 +387,7 @@ async fn recover_pending_keychain_read_error_keeps_pending() {
             lang: Lang::Ru,
             theme: Theme::System,
             show_real_balance: false,
+            ..Settings::default()
         })
         .expect("настройки");
     let mut rec = history_record("crashed", JobStatus::Pending);
@@ -431,6 +437,8 @@ async fn fetch_balance_403_falls_back_to_local() {
 
     let view = cmd_fetch_balance(&state).await.expect("fetch_balance");
     assert_eq!(view.real, None, "403 -> реальный баланс скрыт");
+    assert_eq!(view.provider, Provider::CheaperInference);
+    assert_eq!(view.unavailable, Some(BalanceUnavailable::PermissionDenied));
     assert!(
         (view.local_spend_usd - 0.04).abs() < 1e-9,
         "фолбэк на локальный расход"
@@ -469,8 +477,11 @@ async fn fetch_models_with_key_uses_v1_models_and_filters_by_kind() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/v1/models"))
+        .and(wiremock::matchers::query_param("type", "image"))
         .and(header("authorization", "Bearer ci_live_test"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(catalog_response()))
+        .respond_with(ResponseTemplate::new(200).set_body_string(include_str!(
+            "../../crates/km-shared/tests/fixtures/v1-models.json"
+        )))
         .expect(1)
         .mount(&server)
         .await;
@@ -482,7 +493,7 @@ async fn fetch_models_with_key_uses_v1_models_and_filters_by_kind() {
         .await
         .expect("fetch_models");
     assert_eq!(models.len(), 1, "только image-модели");
-    assert_eq!(models[0].id, "flux-2-pro");
+    assert_eq!(models[0].id, "flux-2-flex");
 }
 
 #[tokio::test]
@@ -555,6 +566,7 @@ async fn settings_roundtrip_via_commands() {
         lang: Lang::En,
         theme: Theme::Dark,
         show_real_balance: true,
+        ..Settings::default()
     };
     cmd_set_settings(&state, settings.clone())
         .await
@@ -578,7 +590,11 @@ async fn set_api_key_stores_in_key_store_not_in_sqlite() {
         .await
         .expect("set_api_key");
     assert_eq!(
-        state.key_store.get().expect("get").as_deref(),
+        state
+            .key_store
+            .get(Provider::CheaperInference)
+            .expect("get")
+            .as_deref(),
         Some("ci_live_secret_key"),
         "ключ в KeyStore"
     );
@@ -595,7 +611,10 @@ async fn set_api_key_stores_in_key_store_not_in_sqlite() {
         .await
         .expect("пустой set_api_key");
     assert_eq!(
-        state.key_store.get().expect("get"),
+        state
+            .key_store
+            .get(Provider::CheaperInference)
+            .expect("get"),
         None,
         "пустой ключ удаляет запись"
     );
@@ -936,6 +955,36 @@ async fn open_file_outside_folder_returns_error() {
 }
 
 #[tokio::test]
+async fn history_file_remains_accessible_after_folder_change() {
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let (state, _) = state_for(&server, &tmp, None);
+    with_folder(&state, &tmp);
+    let original = dunce::canonicalize(tmp.path()).unwrap().join("video-1.mp4");
+    std::fs::write(&original, b"video").unwrap();
+    let mut rec = history_record("previous-folder", JobStatus::Completed);
+    rec.local_paths = vec![original.to_str().unwrap().to_owned()];
+    state.storage.insert_history(&rec).unwrap();
+    assert_eq!(
+        cmd_open_file(&state, original.to_str().unwrap())
+            .await
+            .unwrap(),
+        original
+    );
+}
+
+#[tokio::test]
+async fn delete_preserves_a_pending_generation_for_recovery() {
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let (state, _) = state_for(&server, &tmp, None);
+    let rec = history_record("paid-pending", JobStatus::Pending);
+    state.storage.insert_history(&rec).unwrap();
+    assert!(cmd_delete_history(&state, &rec.id).await.is_err());
+    assert_eq!(state.storage.pending().unwrap(), vec![rec]);
+}
+
+#[tokio::test]
 async fn open_file_traversal_outside_folder_returns_error() {
     let server = MockServer::start().await;
     let tmp = TempDir::new().expect("tempdir");
@@ -1052,4 +1101,705 @@ fn event_names_and_payload_shape_are_pinned() {
     assert_eq!(payload, json!({"generation_started": {"history_id": "h1"}}));
     let payload = serde_json::to_value(AppEvent::BalanceUpdated).expect("сериализация");
     assert_eq!(payload, json!("balance_updated"));
+}
+
+#[tokio::test]
+async fn recovery_preserves_in_flight_generation_when_settings_change() {
+    use std::time::Duration;
+
+    let server = MockServer::start().await;
+    let paid = Mock::given(method("POST"))
+        .and(path("/v1/images/generations"))
+        .and(header("authorization", "Bearer ci_live_original"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(image_response())
+                .set_delay(Duration::from_millis(50)),
+        )
+        .expect(1)
+        .mount_as_scoped(&server)
+        .await;
+    let tmp = TempDir::new().unwrap();
+    let (state, events) = state_for(&server, &tmp, Some("ci_live_original"));
+    let original = with_folder(&state, &tmp);
+    let generate = cmd_generate(&state, image_request());
+    tokio::pin!(generate);
+    // Сервер уже принял оплачиваемый POST. Останавливаем опрос future генерации
+    // до проверки гонки: даже при мгновенном ответе request_id ещё не попадёт в БД.
+    tokio::select! {
+        biased;
+        () = paid.wait_until_satisfied() => {}
+        result = &mut generate => panic!("генерация завершилась до перехвата POST: {result:?}"),
+        () = tokio::time::sleep(Duration::from_secs(10)) => panic!("сервер не получил POST"),
+    }
+    let before = state.storage.pending().unwrap();
+    assert_eq!(before.len(), 1);
+    assert!(before[0].request_id.is_none());
+
+    let recover = cmd_recover_pending(&state);
+    tokio::pin!(recover);
+    // Допустимы и ожидание генерации, и немедленный пропуск живой записи.
+    let early = tokio::time::timeout(Duration::from_millis(100), &mut recover)
+        .await
+        .ok();
+    let next_folder = tmp.path().join("next");
+    std::fs::create_dir(&next_folder).unwrap();
+    let mut changed = cmd_get_settings(&state).await.unwrap();
+    changed.local_folder = next_folder.to_string_lossy().into_owned();
+    changed.provider = Provider::OpenRouter;
+    cmd_set_settings(&state, changed).await.unwrap();
+    cmd_set_api_key(&state, "ci_live_next").await.unwrap();
+    assert_eq!(state.storage.pending().unwrap(), before);
+
+    let completed = generate.await.unwrap();
+    let recovered = match early {
+        Some(result) => result,
+        None => recover.await,
+    }
+    .unwrap();
+    assert!(
+        recovered.is_empty(),
+        "восстановление пропускает активную запись"
+    );
+    assert_eq!(completed.id, before[0].id);
+    assert_eq!(completed.status, JobStatus::Completed);
+    assert_eq!(
+        state.storage.history(&HistoryFilter::default()).unwrap(),
+        vec![completed.clone()]
+    );
+    assert_eq!(media_entries(&original).len(), 1);
+    assert_eq!(
+        PathBuf::from(&completed.local_paths[0]).parent(),
+        Some(original.as_path())
+    );
+    assert!(media_entries(&next_folder).is_empty());
+    assert_eq!(
+        state
+            .storage
+            .total_spend_usd(Provider::CheaperInference)
+            .unwrap(),
+        0.04
+    );
+    assert_eq!(completed.provider, Provider::CheaperInference);
+    assert_eq!(
+        received(&server).await.len(),
+        1,
+        "единственный запрос — исходный POST"
+    );
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec![
+            AppEvent::GenerationStarted {
+                history_id: completed.id.clone()
+            },
+            AppEvent::GenerationDone {
+                history_id: completed.id
+            },
+            AppEvent::BalanceUpdated,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn connection_checks_typed_key_without_overwriting_saved_key() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header("authorization", "Bearer new-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"object":"list","data":[]})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let tmp = TempDir::new().unwrap();
+    let (state, _) = state_for(&server, &tmp, Some("old-key"));
+    assert!(
+        koteyye_media_studio::commands::cmd_check_key(&state, Some("  new-key  "))
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        state
+            .key_store
+            .get(Provider::CheaperInference)
+            .unwrap()
+            .as_deref(),
+        Some("old-key")
+    );
+}
+
+#[tokio::test]
+async fn balance_reports_ip_policy_denial_instead_of_a_missing_scope() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/account/balance"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "error":{"code":"ip_not_allowed","message":"IP address denied by key policy"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let tmp = TempDir::new().unwrap();
+    let (state, _) = state_for(&server, &tmp, Some("test"));
+    let mut settings = state.storage.get_settings().unwrap();
+    settings.show_real_balance = true;
+    state.storage.set_settings(&settings).unwrap();
+    let view = cmd_fetch_balance(&state).await.unwrap();
+    assert!(view.real.is_none());
+    assert_eq!(view.unavailable, Some(BalanceUnavailable::AccessRestricted));
+    assert_eq!(view.local_spend_usd, 0.0);
+    assert!(
+        view.real_error
+            .as_deref()
+            .unwrap()
+            .contains("ip_not_allowed")
+    );
+}
+
+#[tokio::test]
+async fn edit_proxy_failure_keeps_diagnostics_without_treating_trace_id_as_a_receipt() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/images/edits"))
+        .respond_with(
+            ResponseTemplate::new(500)
+                .insert_header("x-request-id", "req-edit-trace")
+                .set_body_json(
+                    json!({"error":{"code":"server_error","message":"Unexpected proxy error."}}),
+                ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let tmp = TempDir::new().unwrap();
+    let (state, events) = state_for(&server, &tmp, Some("test-key"));
+    with_folder(&state, &tmp);
+    let mut request = image_request();
+    request.mode = GenMode::ImageEdit;
+    request.model = "minimax-h3-image".into();
+    request.references.push(km_shared::Reference {
+        data_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9qkAAAAASUVORK5CYII=".into(),
+    });
+    let error = cmd_generate(&state, request).await.unwrap_err();
+    assert!(error.contains("HTTP 500 (server_error)"));
+    assert!(error.contains("minimax-h3-image"));
+    assert!(error.contains("Unexpected proxy error."));
+    assert!(error.contains("req-edit-trace"));
+    let records = cmd_list_history(&state, HistoryFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    let rec = &records[0];
+    assert_eq!(rec.status, JobStatus::Failed);
+    assert_eq!(rec.error.as_deref(), Some(error.as_str()));
+    assert!(rec.request_id.is_none());
+    assert!(rec.cost_usd.is_none());
+    assert!(events.lock().unwrap().iter().any(
+        |e| matches!(e, AppEvent::GenerationFailed { error: message, .. } if message == &error)
+    ));
+    assert!(cmd_recover_pending(&state).await.unwrap().is_empty());
+    assert_eq!(received(&server).await.len(), 1);
+}
+
+#[tokio::test]
+async fn provider_credentials_use_separate_entries_hosts_and_strict_validation() {
+    let ci = MockServer::start().await;
+    let router = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let (mut state, _) = state_for(&ci, &tmp, None);
+    state.openrouter = OpenRouterKeyClient::for_localhost(router.address().port());
+    let ci_id = Provider::CheaperInference;
+    let or_id = Provider::OpenRouter;
+    assert!(!cmd_provider_has_key(&state, ci_id).await.unwrap());
+    assert!(!cmd_check_provider_key(&state, or_id, None).await.unwrap());
+    cmd_set_api_key(&state, " ci-test-value ").await.unwrap();
+    assert!(!cmd_provider_has_key(&state, or_id).await.unwrap());
+    cmd_set_provider_key(&state, or_id, " router-stored ")
+        .await
+        .unwrap();
+    assert!(cmd_provider_has_key(&state, ci_id).await.unwrap());
+    assert!(cmd_provider_has_key(&state, or_id).await.unwrap());
+    for (wrong_slot, foreign) in [
+        (ci_id, "sk-or-v1-fixture"),
+        (or_id, "ci_live_fixture"),
+        (or_id, "ir_live_legacy_fixture"),
+    ] {
+        assert!(
+            !cmd_check_provider_key(&state, wrong_slot, Some(foreign))
+                .await
+                .unwrap()
+        );
+        assert!(
+            cmd_set_provider_key(&state, wrong_slot, foreign)
+                .await
+                .is_err()
+        );
+    }
+    assert!(received(&ci).await.is_empty());
+    assert!(received(&router).await.is_empty());
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(query_param("type", "decision"))
+        .and(header("authorization", "Bearer ci-test-value"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[]})))
+        .expect(1)
+        .mount(&ci)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/key"))
+        .and(header("authorization", "Bearer router-candidate"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data":{"label":"test-only","limit_remaining":null}})),
+        )
+        .expect(1)
+        .mount(&router)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/key"))
+        .and(header("authorization", "Bearer router-stored"))
+        .respond_with(ResponseTemplate::new(401))
+        .expect(1)
+        .mount(&router)
+        .await;
+    assert!(cmd_test_connection(&state).await.unwrap());
+    assert!(
+        cmd_check_provider_key(&state, or_id, Some(" router-candidate "))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !cmd_check_provider_key(&state, or_id, Some("  "))
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        state.key_store.get(or_id).unwrap().as_deref(),
+        Some("router-stored")
+    );
+
+    for (status, body) in [
+        (200, json!({"data":[]})),
+        (200, json!({"other":true})),
+        (200, json!([{}])),
+        (204, Value::Null),
+        (403, json!({"error":{"message":"bad test-secret"}})),
+        (500, json!({"error":"test-secret"})),
+        (302, Value::Null),
+    ] {
+        let mut response = ResponseTemplate::new(status);
+        if !body.is_null() {
+            response = response.set_body_json(body);
+        }
+        if status == 302 {
+            response = response.insert_header("location", format!("{}/must-not-follow", ci.uri()));
+        }
+        let guard = Mock::given(method("GET"))
+            .and(path("/api/v1/key"))
+            .and(header("authorization", "Bearer test-secret"))
+            .respond_with(response)
+            .expect(1)
+            .mount_as_scoped(&router)
+            .await;
+        let e = cmd_check_provider_key(&state, or_id, Some("test-secret"))
+            .await
+            .unwrap_err();
+        assert!(!e.contains("test-secret"));
+        if status != 200 {
+            assert!(e.contains(&status.to_string()), "{e}");
+        }
+        drop(guard);
+    }
+    cmd_set_provider_key(&state, or_id, " ").await.unwrap();
+    assert!(!cmd_provider_has_key(&state, or_id).await.unwrap());
+    assert!(cmd_provider_has_key(&state, ci_id).await.unwrap());
+    assert_eq!(received(&ci).await.len(), 1);
+    assert_eq!(received(&router).await.len(), 9);
+}
+
+#[tokio::test]
+async fn openrouter_workspace_never_uses_ci_keys_or_falls_back_to_ci_generation() {
+    let ci = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let (emit, _) = collector();
+    let state = AppState::new(
+        &tmp.path().join("test.db"),
+        Box::new(UnreadableKeyStore),
+        &ci.uri(),
+        emit,
+    )
+    .unwrap();
+    with_folder(&state, &tmp);
+    let mut record = history_record("router-receipt", JobStatus::Pending);
+    record.provider = Provider::OpenRouter;
+    record.cost_usd = Some(0.125);
+    state.storage.insert_history(&record).unwrap();
+    let mut settings = cmd_get_settings(&state).await.unwrap();
+    settings.provider = Provider::OpenRouter;
+    settings.show_real_balance = true;
+    cmd_set_settings(&state, settings.clone()).await.unwrap();
+    assert!(
+        cmd_fetch_models(&state, MediaKind::Video)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let balance = cmd_fetch_balance(&state).await.unwrap();
+    assert!(balance.real.is_none());
+    assert_eq!(balance.local_spend_usd, 0.125);
+    assert_eq!(balance.unavailable, Some(BalanceUnavailable::KeyStore));
+    assert!(
+        cmd_generate(&state, image_request())
+            .await
+            .unwrap_err()
+            .contains("OpenRouter")
+    );
+    assert!(
+        cmd_generate_for(&state, Provider::OpenRouter, image_request())
+            .await
+            .unwrap_err()
+            .contains("OpenRouter")
+    );
+    assert!(cmd_recover_pending(&state).await.unwrap().is_empty());
+    settings.provider = Provider::CheaperInference;
+    cmd_set_settings(&state, settings).await.unwrap();
+    assert!(
+        cmd_generate_for(&state, Provider::OpenRouter, image_request())
+            .await
+            .unwrap_err()
+            .contains("OpenRouter")
+    );
+    assert_eq!(state.storage.pending().unwrap(), vec![record]);
+    assert!(received(&ci).await.is_empty());
+}
+
+#[tokio::test]
+async fn recovery_uses_each_records_origin_while_openrouter_is_active() {
+    let ci = MockServer::start().await;
+    let or = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let (mut state, _) = state_for(&ci, &tmp, Some("ci-recovery-key"));
+    state.openrouter = OpenRouterKeyClient::for_localhost(or.address().port());
+    with_folder(&state, &tmp);
+    let mut settings = cmd_get_settings(&state).await.unwrap();
+    settings.provider = Provider::OpenRouter;
+    cmd_set_settings(&state, settings).await.unwrap();
+    cmd_set_provider_key(&state, Provider::OpenRouter, "or-recovery-key")
+        .await
+        .unwrap();
+    let mut ours = history_record("ci", JobStatus::Pending);
+    ours.request_id = Some("ci-receipt".into());
+    let mut theirs = history_record("or", JobStatus::Pending);
+    theirs.provider = Provider::OpenRouter;
+    state.storage.insert_history(&ours).unwrap();
+    state.storage.insert_history(&theirs).unwrap();
+    Mock::given(method("GET")).and(path("/v1/generations/ci-receipt"))
+        .and(header("authorization","Bearer ci-recovery-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "request_id":"ci-receipt","endpoint":"/v1/images/generations","created_at":"2026-11-26T00:00:00Z","expires_at":"2026-12-03T00:00:00Z",
+            "files":[{"index":0,"type":"image","content_type":"image/png","size_bytes":2,"url":format!("{}/signed/p.png",ci.uri())}]
+        }))).expect(1).mount(&ci).await;
+    Mock::given(method("GET"))
+        .and(path("/signed/p.png"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"hi"))
+        .expect(1)
+        .mount(&ci)
+        .await;
+    let recovered = cmd_recover_pending(&state).await.unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].id, ours.id);
+    assert_eq!(recovered[0].status, JobStatus::Completed);
+    assert_eq!(recovered[0].provider, Provider::CheaperInference);
+    assert_eq!(state.storage.pending().unwrap(), vec![theirs]);
+    assert!(received(&or).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_provider_change_during_keychain_access_prevents_the_paid_post() {
+    use std::sync::mpsc::{Receiver, Sender, channel};
+    use std::time::Duration;
+    struct WaitingKey {
+        started: Sender<()>,
+        resume: Mutex<Receiver<()>>,
+    }
+    impl KeyStore for WaitingKey {
+        fn get(&self, provider: Provider) -> Result<Option<String>, String> {
+            assert_eq!(provider, Provider::CheaperInference);
+            self.started.send(()).unwrap();
+            self.resume
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+            Ok(Some("ci-held-by-dialog".into()))
+        }
+        fn set(&self, _provider: Provider, _key: &str) -> Result<(), String> {
+            unreachable!()
+        }
+        fn delete(&self, _provider: Provider) -> Result<(), String> {
+            unreachable!()
+        }
+    }
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let (emit, events) = collector();
+    let (started, wait_started) = channel();
+    let (resume, wait_resume) = channel();
+    let state = Arc::new(
+        AppState::new(
+            &tmp.path().join("h.db"),
+            Box::new(WaitingKey {
+                started,
+                resume: Mutex::new(wait_resume),
+            }),
+            &server.uri(),
+            emit,
+        )
+        .unwrap(),
+    );
+    with_folder(&state, &tmp);
+    let task_state = state.clone();
+    let run = tokio::spawn(async move {
+        cmd_generate_for(&task_state, Provider::CheaperInference, image_request()).await
+    });
+    tokio::task::spawn_blocking(move || wait_started.recv_timeout(Duration::from_secs(5)))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut prefs = cmd_get_settings(&state).await.unwrap();
+    prefs.provider = Provider::OpenRouter;
+    cmd_set_settings(&state, prefs).await.unwrap();
+    resume.send(()).unwrap();
+    let error = run.await.unwrap().unwrap_err();
+    assert!(error.contains("провайдер"), "{error}");
+    assert!(
+        state
+            .storage
+            .history(&HistoryFilter::default())
+            .unwrap()
+            .is_empty()
+    );
+    assert!(received(&server).await.is_empty());
+    assert!(events.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn balance_switches_show_only_the_requested_providers_spend() {
+    let ci = MockServer::start().await;
+    let or = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let (mut state, _) = state_for(&ci, &tmp, Some("ci-fixture"));
+    state.openrouter = OpenRouterKeyClient::for_localhost(or.address().port());
+    cmd_set_provider_key(&state, Provider::OpenRouter, "router-fixture")
+        .await
+        .unwrap();
+
+    let mut old = history_record("existing-ci", JobStatus::Completed);
+    old.cost_usd = Some(0.36);
+    state.storage.insert_history(&old).unwrap();
+    let first = cmd_fetch_balance(&state).await.unwrap();
+    let legacy_payload = json!({"real": null, "local_spend_usd":0.36});
+    assert_eq!(
+        serde_json::from_value::<km_shared::BalanceView>(legacy_payload).unwrap(),
+        first
+    );
+    assert_eq!(
+        (first.provider, first.local_spend_usd),
+        (Provider::CheaperInference, 0.36)
+    );
+    let mut prefs = cmd_get_settings(&state).await.unwrap();
+    prefs.provider = Provider::OpenRouter;
+    cmd_set_settings(&state, prefs.clone()).await.unwrap();
+    assert!(
+        cmd_fetch_balance_for(&state, Provider::CheaperInference)
+            .await
+            .is_err()
+    );
+    let empty = cmd_fetch_balance_for(&state, Provider::OpenRouter)
+        .await
+        .unwrap();
+    assert_eq!(
+        (empty.provider, empty.local_spend_usd),
+        (Provider::OpenRouter, 0.0)
+    );
+    assert!(
+        empty.openrouter_credits.is_none() && empty.real.is_none() && empty.unavailable.is_none()
+    );
+    assert_eq!(
+        serde_json::to_value(&empty).unwrap()["provider"],
+        "openrouter"
+    );
+    let mut placed = history_record("router", JobStatus::Pending);
+    placed.provider = Provider::OpenRouter;
+    placed.cost_usd = Some(0.08);
+    state.storage.insert_history(&placed).unwrap();
+    assert_eq!(
+        cmd_fetch_balance(&state).await.unwrap().local_spend_usd,
+        0.08
+    );
+    prefs.provider = Provider::CheaperInference;
+    cmd_set_settings(&state, prefs).await.unwrap();
+    assert_eq!(
+        cmd_fetch_balance_for(&state, Provider::CheaperInference)
+            .await
+            .unwrap(),
+        first
+    );
+    assert!(received(&ci).await.is_empty() && received(&or).await.is_empty());
+}
+
+#[tokio::test]
+async fn openrouter_account_credits_use_only_the_selected_wallet_and_key() {
+    let ci = MockServer::start().await;
+    let or = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let (mut state, _) = state_for(&ci, &tmp, Some("ci-fixture"));
+    state.openrouter = OpenRouterKeyClient::for_localhost(or.address().port());
+    let mut prefs = cmd_get_settings(&state).await.unwrap();
+    prefs.provider = Provider::OpenRouter;
+    prefs.show_real_balance = true;
+    cmd_set_settings(&state, prefs).await.unwrap();
+    let mut ours = history_record("router", JobStatus::Completed);
+    ours.provider = Provider::OpenRouter;
+    ours.cost_usd = Some(0.08);
+    state.storage.insert_history(&ours).unwrap();
+    let mut legacy = history_record("ci", JobStatus::Completed);
+    legacy.cost_usd = Some(0.36);
+    state.storage.insert_history(&legacy).unwrap();
+    let no_key = cmd_fetch_balance(&state).await.unwrap();
+    assert_eq!(no_key.unavailable, Some(BalanceUnavailable::MissingKey));
+    assert_eq!(no_key.local_spend_usd, 0.08);
+    assert!(received(&or).await.is_empty());
+
+    // Прежнее, ошибочно заполненное хранилище также не отправит CI ключ в OpenRouter.
+    state
+        .key_store
+        .set(Provider::OpenRouter, "ci_live_fixture")
+        .unwrap();
+    let foreign = cmd_fetch_balance(&state).await.unwrap();
+    assert_eq!(foreign.unavailable, Some(BalanceUnavailable::RejectedKey));
+    assert!(received(&or).await.is_empty());
+
+    let cases = [
+        (
+            403,
+            json!({"error":{"code":403,"message":"Only management keys can perform this operation"}}),
+            Some(BalanceUnavailable::PermissionDenied),
+        ),
+        (
+            401,
+            json!({"error":{"code":401,"message":"expired"}}),
+            Some(BalanceUnavailable::RejectedKey),
+        ),
+        (
+            500,
+            json!({"error":{"message":"sensitive wallet metadata"}}),
+            Some(BalanceUnavailable::Other),
+        ),
+        (
+            200,
+            json!({"data":{"limit_remaining":9000}}),
+            Some(BalanceUnavailable::Other),
+        ),
+        (
+            200,
+            json!({"data":{"total_credits":100.5,"total_usage":25.75,"limit_remaining":9000}}),
+            None,
+        ),
+    ];
+    for (index, (status, payload, expected_problem)) in cases.into_iter().enumerate() {
+        let key = format!("wallet-test-{index}");
+        cmd_set_provider_key(&state, Provider::OpenRouter, &key)
+            .await
+            .unwrap();
+        Mock::given(method("GET"))
+            .and(path("/api/v1/credits"))
+            .and(header("authorization", format!("Bearer {key}")))
+            .respond_with(ResponseTemplate::new(status).set_body_json(payload))
+            .expect(1)
+            .mount(&or)
+            .await;
+        let view = cmd_fetch_balance_for(&state, Provider::OpenRouter)
+            .await
+            .unwrap();
+        assert_eq!(view.provider, Provider::OpenRouter);
+        assert_eq!(view.local_spend_usd, 0.08);
+        assert!(view.real.is_none());
+        assert_eq!(view.unavailable, expected_problem);
+        if expected_problem.is_none() {
+            let credits = view.openrouter_credits.unwrap();
+            assert_eq!(
+                (
+                    credits.total_credits,
+                    credits.total_usage,
+                    credits.remaining_usd()
+                ),
+                (100.5, 25.75, 74.75)
+            );
+        } else {
+            assert!(view.openrouter_credits.is_none());
+        }
+    }
+    assert_eq!(received(&or).await.len(), 5);
+    assert!(received(&ci).await.is_empty());
+
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    state.openrouter = OpenRouterKeyClient::for_localhost(listener.local_addr().unwrap().port());
+    let disconnect = std::thread::spawn(move || {
+        let _ = listener.accept().unwrap();
+    });
+    let failed = cmd_fetch_balance_for(&state, Provider::OpenRouter)
+        .await
+        .unwrap();
+    disconnect.join().unwrap();
+    assert_eq!(failed.unavailable, Some(BalanceUnavailable::Network));
+    assert_eq!(failed.local_spend_usd, 0.08);
+}
+
+#[tokio::test]
+async fn delayed_wallet_is_discarded_after_switching_away_back_or_replacing_the_key() {
+    use std::time::Duration;
+    for change_key in [false, true] {
+        let ci = MockServer::start().await;
+        let tmp = TempDir::new().unwrap();
+        let (state, _) = state_for(&ci, &tmp, Some("previous-account"));
+        let active = Provider::CheaperInference;
+        let mut prefs = cmd_get_settings(&state).await.unwrap();
+        prefs.show_real_balance = true;
+        cmd_set_settings(&state, prefs.clone()).await.unwrap();
+        let pending = Mock::given(method("GET"))
+            .and(path("/v1/account/balance"))
+            .and(header("authorization", "Bearer previous-account"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({
+                        "currency":"USD","balance_usd":90.0,"available_usd":89.0,"reserved_usd":1.0
+                    }))
+                    .set_delay(Duration::from_millis(80)),
+            )
+            .expect(1)
+            .mount_as_scoped(&ci)
+            .await;
+        let request = cmd_fetch_balance_for(&state, active);
+        tokio::pin!(request);
+        tokio::select! {
+            biased;
+            ()=pending.wait_until_satisfied()=>{}
+            _=&mut request=>panic!("wallet returned before the server received its GET"),
+            ()=tokio::time::sleep(Duration::from_secs(5))=>panic!("no wallet request"),
+        }
+        if change_key {
+            cmd_set_provider_key(&state, active, "new-account")
+                .await
+                .unwrap();
+        } else {
+            prefs.provider = Provider::OpenRouter;
+            cmd_set_settings(&state, prefs.clone()).await.unwrap();
+            prefs.provider = active;
+            cmd_set_settings(&state, prefs).await.unwrap();
+        }
+        assert!(
+            request.await.is_err(),
+            "old wallet must never reach the new selection"
+        );
+    }
 }

@@ -7,7 +7,7 @@ out_dir = "dist"
 public_dir = "assets"
 
 [web.app]
-title = "Koteyye Media Studio 2.0"
+title = "Koteyye Media Studio v2"
 # Пустой base_path = раздача от корня (в 0.7 значение "." монтируется как путь "/.").
 base_path = ""
 

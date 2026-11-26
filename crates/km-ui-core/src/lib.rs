@@ -6,5 +6,12 @@
 //! не дублируя словари, цвета и форматы.
 
 pub mod format;
+mod generator_i18n;
 pub mod i18n;
+mod media_i18n;
+mod settings_workspace_i18n;
+pub mod studio;
+pub mod studio_controls_i18n;
+mod studio_i18n;
+pub mod studio_results;
 pub mod theme;

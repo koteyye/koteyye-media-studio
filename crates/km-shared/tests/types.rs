@@ -226,6 +226,8 @@ fn settings_round_trip_lowercase_enums() {
     assert_eq!(settings.lang, Lang::Ru);
     assert_eq!(settings.theme, Theme::System);
     assert!(settings.show_real_balance);
+    assert_eq!(settings.provider, km_shared::Provider::CheaperInference);
+    assert_eq!(settings.workspace, km_shared::WorkspacePrefs::default());
 
     let value = serde_json::to_value(&settings).expect("настройки должны сериализоваться");
     assert_eq!(value["lang"], "ru");

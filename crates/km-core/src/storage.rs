@@ -11,10 +11,10 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use km_shared::{HistoryFilter, HistoryPatch, HistoryRecord, JobStatus, Lang, Settings, Theme};
+use km_shared::{HistoryFilter, HistoryPatch, HistoryRecord, JobStatus, Provider, Settings};
 use rusqlite::functions::FunctionFlags;
 use rusqlite::types::Value;
-use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params, params_from_iter};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -23,7 +23,7 @@ use crate::error::CoreError;
 /// Результат операций хранилища: ошибка ядра [`CoreError`].
 type Result<T> = std::result::Result<T, CoreError>;
 
-/// Схема БД: создаётся при каждом открытии (`IF NOT EXISTS` — миграция не нужна).
+/// Схема для новой базы. Старые записи получают источник при миграции в `init`.
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS history (
     id TEXT PRIMARY KEY,
@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS history (
     local_paths TEXT NOT NULL,
     cost_usd REAL,
     params_json TEXT NOT NULL,
-    error TEXT
+    error TEXT,
+    provider TEXT NOT NULL DEFAULT 'ci'
 );
 CREATE TABLE IF NOT EXISTS settings (
     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -48,7 +49,7 @@ CREATE TABLE IF NOT EXISTS settings (
 
 /// Выборка всех колонок истории в порядке, ожидаемом [`HistoryRow::from_row`].
 const SELECT_HISTORY: &str = "SELECT id, created_at, updated_at, kind, mode, model, prompt, \
-     status, request_id, local_paths, cost_usd, params_json, error FROM history";
+     status, request_id, local_paths, cost_usd, params_json, error, provider FROM history";
 
 /// SQLite-хранилище истории, расхода и настроек на одном соединении.
 ///
@@ -81,7 +82,7 @@ impl Storage {
     }
 
     /// Регистрирует функцию lowercase и создаёт схему на готовом соединении.
-    fn init(conn: Connection) -> Result<Storage> {
+    fn init(mut conn: Connection) -> Result<Storage> {
         // Регистронезависимый поиск с Unicode: встроенный LOWER сворачивает лишь ASCII.
         conn.create_scalar_function(
             "km_lower",
@@ -94,6 +95,26 @@ impl Storage {
         )
         .map_err(db)?;
         conn.execute_batch(SCHEMA).map_err(db)?;
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(db)?;
+        if version < 2 {
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(db)?;
+            let has_provider: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('history') WHERE name = 'provider')",
+                [], |row| row.get(0),
+            ).map_err(db)?;
+            if !has_provider {
+                tx.execute_batch(
+                    "ALTER TABLE history ADD COLUMN provider TEXT NOT NULL DEFAULT 'ci'",
+                )
+                .map_err(db)?;
+            }
+            tx.pragma_update(None, "user_version", 2).map_err(db)?;
+            tx.commit().map_err(db)?;
+        }
         Ok(Storage {
             conn: Mutex::new(conn),
         })
@@ -114,16 +135,36 @@ impl Storage {
     /// [`CoreError::Db`] при сбое вставки (например, дубликат `id`);
     /// [`CoreError::Serde`] при сериализации `local_paths`.
     pub fn insert_history(&self, rec: &HistoryRecord) -> Result<()> {
+        Self::insert_into(&self.lock(), rec)
+    }
+
+    /// Смена профиля до принятия задачи отклоняет запрос. После записи Pending
+    /// задача продолжает работу на своём провайдере без блокировки БД во время HTTP.
+    pub(crate) fn begin_generation(&self, rec: &HistoryRecord) -> Result<()> {
+        let mut conn = self.lock();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db)?;
+        if Self::read_settings(&tx)?.provider != rec.provider {
+            return Err(CoreError::Validation(
+                "активный провайдер изменился; проверьте форму перед запуском".into(),
+            ));
+        }
+        Self::insert_into(&tx, rec)?;
+        tx.commit().map_err(db)
+    }
+
+    fn insert_into(conn: &Connection, rec: &HistoryRecord) -> Result<()> {
         let kind = enum_to_text(&rec.kind)?;
         let mode = enum_to_text(&rec.mode)?;
         let status = enum_to_text(&rec.status)?;
+        let provider = enum_to_text(&rec.provider)?;
         let local_paths = serde_json::to_string(&rec.local_paths).map_err(serde)?;
         let cost = finite_cost(rec.cost_usd);
-        let conn = self.lock();
         conn.execute(
             "INSERT INTO history (id, created_at, updated_at, kind, mode, model, prompt, \
-             status, request_id, local_paths, cost_usd, params_json, error) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             status, request_id, local_paths, cost_usd, params_json, error, provider) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 rec.id,
                 rec.created_at,
@@ -137,7 +178,8 @@ impl Storage {
                 local_paths,
                 cost,
                 rec.params_json,
-                rec.error
+                rec.error,
+                provider
             ],
         )
         .map_err(db)?;
@@ -182,6 +224,8 @@ impl Storage {
         if let Some(error) = &patch.error {
             assignments.push("error = ?".to_owned());
             values.push(Value::Text(error.clone()));
+        } else if patch.status == Some(JobStatus::Completed) {
+            assignments.push("error = NULL".to_owned());
         }
         values.push(Value::Text(id.to_owned()));
         let sql = format!("UPDATE history SET {} WHERE id = ?", assignments.join(", "));
@@ -226,9 +270,55 @@ impl Storage {
     /// [`CoreError::Db`] при сбое удаления.
     pub fn delete_history(&self, id: &str) -> Result<()> {
         let conn = self.lock();
-        conn.execute("DELETE FROM history WHERE id = ?", params![id])
+        let removed = conn
+            .execute(
+                "DELETE FROM history WHERE id = ? AND status <> 'pending'",
+                [id],
+            )
             .map_err(db)?;
+        if removed == 0
+            && conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM history WHERE id = ? AND status = 'pending')",
+                    [id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(db)?
+        {
+            return Err(CoreError::Validation(
+                "незавершённая генерация ещё нужна для восстановления".into(),
+            ));
+        }
         Ok(())
+    }
+
+    /// Файл прежней папки доступен из истории только по записанному ядром пути.
+    pub fn has_result_path(&self, path: &str) -> Result<bool> {
+        self.lock()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM history, json_each(history.local_paths) AS file
+             WHERE history.status = 'completed' AND file.value = ?)",
+                [path],
+                |row| row.get(0),
+            )
+            .map_err(db)
+    }
+
+    /// Выбранный файл готовой серии изображений. Запрос не читает промпты и исходные вложения.
+    pub fn completed_image_path(&self, id: &str, index: usize) -> Result<Option<String>> {
+        let Ok(index) = i64::try_from(index) else {
+            return Ok(None);
+        };
+        self.lock()
+            .query_row(
+                "SELECT file.value FROM history, json_each(history.local_paths) AS file
+                 WHERE history.id = ?1 AND history.kind = 'image' AND history.status = 'completed'
+                 AND file.key = ?2 AND file.type = 'text'",
+                params![id, index],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db)
     }
 
     /// Записи со статусом `pending`, новые первыми — для восстановления при старте.
@@ -241,19 +331,36 @@ impl Storage {
         self.fetch("WHERE status = ?", vec![Value::Text(status)])
     }
 
-    /// Сумма расхода по всей истории в USD; `NULL`-стоимости не учитываются.
+    pub fn has_pending_for(&self, provider: Provider) -> Result<bool> {
+        self.lock()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM history WHERE status = 'pending' AND provider = ?1)",
+                [enum_to_text(&provider)?],
+                |row| row.get(0),
+            )
+            .map_err(db)
+    }
+
+    pub(crate) fn pending_for(&self, provider: Provider) -> Result<Vec<HistoryRecord>> {
+        self.fetch(
+            "WHERE status = 'pending' AND provider = ?",
+            vec![Value::Text(enum_to_text(&provider)?)],
+        )
+    }
+
+    /// Сумма известных списаний одного провайдера в USD.
     ///
     /// Пустая БД даёт `0.0`. Неконечные стоимости отброшены ещё при записи.
     ///
     /// # Errors
     ///
     /// [`CoreError::Db`] при сбое запроса.
-    pub fn total_spend_usd(&self) -> Result<f64> {
+    pub fn total_spend_usd(&self, provider: Provider) -> Result<f64> {
         let conn = self.lock();
         let total: f64 = conn
             .query_row(
-                "SELECT COALESCE(SUM(cost_usd), 0.0) FROM history",
-                [],
+                "SELECT COALESCE(SUM(cost_usd), 0.0) FROM history WHERE provider = ?1",
+                [enum_to_text(&provider)?],
                 |row| row.get(0),
             )
             .map_err(db)?;
@@ -261,13 +368,16 @@ impl Storage {
     }
 
     /// Настройки приложения; при пустой БД — значения по умолчанию
-    /// (язык Ru, тема System, папка пустая, реальный баланс скрыт).
+    /// согласно `Settings::default`.
     ///
     /// # Errors
     ///
     /// [`CoreError::Db`] при сбое запроса; [`CoreError::Serde`] при разборе JSON.
     pub fn get_settings(&self) -> Result<Settings> {
-        let conn = self.lock();
+        Self::read_settings(&self.lock())
+    }
+
+    fn read_settings(conn: &Connection) -> Result<Settings> {
         let json: Option<String> = conn
             .query_row("SELECT json FROM settings WHERE id = 1", [], |row| {
                 row.get(0)
@@ -276,7 +386,7 @@ impl Storage {
             .map_err(db)?;
         match json {
             Some(text) => serde_json::from_str(&text).map_err(serde),
-            None => Ok(default_settings()),
+            None => Ok(Settings::default()),
         }
     }
 
@@ -286,8 +396,32 @@ impl Storage {
     ///
     /// [`CoreError::Db`] при сбое записи; [`CoreError::Serde`] при сериализации.
     pub fn set_settings(&self, settings: &Settings) -> Result<()> {
+        Self::write_settings(&self.lock(), settings)
+    }
+
+    /// Старые версии UI присылают только папку, язык, тему и видимость баланса.
+    /// Сохраняем отсутствующие поля и валидируем типы перед записью.
+    pub fn merge_settings(
+        &self,
+        fields: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Settings> {
+        let mut conn = self.lock();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db)?;
+        let mut value = serde_json::to_value(Self::read_settings(&tx)?).map_err(serde)?;
+        value
+            .as_object_mut()
+            .expect("Settings сериализуется объектом")
+            .extend(fields);
+        let settings: Settings = serde_json::from_value(value).map_err(serde)?;
+        Self::write_settings(&tx, &settings)?;
+        tx.commit().map_err(db)?;
+        Ok(settings)
+    }
+
+    fn write_settings(conn: &Connection, settings: &Settings) -> Result<()> {
         let json = serde_json::to_string(settings).map_err(serde)?;
-        let conn = self.lock();
         conn.execute(
             "INSERT OR REPLACE INTO settings (id, json) VALUES (1, ?)",
             params![json],
@@ -327,6 +461,7 @@ struct HistoryRow {
     cost_usd: Option<f64>,
     params_json: String,
     error: Option<String>,
+    provider: String,
 }
 
 impl HistoryRow {
@@ -346,6 +481,7 @@ impl HistoryRow {
             cost_usd: row.get(10)?,
             params_json: row.get(11)?,
             error: row.get(12)?,
+            provider: row.get(13)?,
         })
     }
 
@@ -353,6 +489,7 @@ impl HistoryRow {
     fn into_record(self) -> Result<HistoryRecord> {
         Ok(HistoryRecord {
             id: self.id,
+            provider: text_to_enum(&self.provider)?,
             created_at: self.created_at,
             updated_at: self.updated_at,
             kind: text_to_enum(&self.kind)?,
@@ -366,16 +503,6 @@ impl HistoryRow {
             params_json: self.params_json,
             error: self.error,
         })
-    }
-}
-
-/// Настройки по умолчанию для пустой БД.
-fn default_settings() -> Settings {
-    Settings {
-        local_folder: String::new(),
-        lang: Lang::Ru,
-        theme: Theme::System,
-        show_real_balance: false,
     }
 }
 

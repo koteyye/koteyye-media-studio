@@ -6,13 +6,14 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+flate2 = "1.1.11"
 km-shared = { version = "2.0.0", path = "../km-shared" }
 # base64 без simd-unsafe: скалярного движка достаточно для картинок,
 # unsafe SIMD-код в зависимости не нужен.
 base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 # reqwest 0.13: TLS по умолчанию — rustls (без системного OpenSSL),
 # system-proxy в дефолтных фичах читает системные прокси macOS.
-reqwest = { version = "0.13.5", features = ["json"] }
+reqwest = { version = "0.13.5", features = ["json", "multipart"] }
 # rusqlite bundled: встроенный SQLite (не системный) — одинаково на macOS/Windows.
 # functions: своя SQL-функция lower для регистронезависимого поиска по кириллице
 # (встроенный LOWER в SQLite сворачивает только ASCII).
@@ -20,6 +21,8 @@ rusqlite = { version = "0.43.0", features = ["bundled", "functions"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"
+# Временный файл в папке результата позволяет публиковать готовые байты без перезаписи.
+tempfile = "3.27.0"
 # uuid v4: случайные идентификаторы записей истории (Jobs::run).
 uuid = { version = "1.29.3", features = ["v4"] }
 
@@ -27,6 +30,5 @@ uuid = { version = "1.29.3", features = ["v4"] }
 # Прямое соединение в тестах изоляции recovery: write-лок (BEGIN IMMEDIATE)
 # моделирует сбой БД у одной записи. Версия та же, что в [dependencies].
 rusqlite = "0.43.0"
-tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6.5"

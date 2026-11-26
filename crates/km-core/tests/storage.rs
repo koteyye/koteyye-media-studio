@@ -4,8 +4,8 @@
 
 use km_core::{CoreError, Storage};
 use km_shared::{
-    GenMode, HistoryFilter, HistoryPatch, HistoryRecord, JobStatus, Lang, MediaKind, Settings,
-    Theme,
+    GenMode, HistoryFilter, HistoryPatch, HistoryRecord, JobStatus, Lang, MediaKind, Provider,
+    Settings, Theme,
 };
 use tempfile::TempDir;
 
@@ -20,6 +20,7 @@ fn record(
     prompt: &str,
 ) -> HistoryRecord {
     HistoryRecord {
+        provider: Provider::CheaperInference,
         id: id.to_owned(),
         created_at,
         updated_at: created_at,
@@ -222,7 +223,9 @@ fn total_spend_sums_costs_ignoring_none() {
     storage.insert_history(&b).expect("insert b");
     storage.insert_history(&c).expect("insert c");
 
-    let total = storage.total_spend_usd().expect("сумма расхода");
+    let total = storage
+        .total_spend_usd(Provider::CheaperInference)
+        .expect("сумма расхода");
     assert!(
         (total - 0.82).abs() < 1e-9,
         "0.04 + 0.78 + None = 0.82, получено {total}"
@@ -232,7 +235,12 @@ fn total_spend_sums_costs_ignoring_none() {
 #[test]
 fn total_spend_empty_db_is_zero() {
     let storage = Storage::open_in_memory().expect("in-memory БД должна открыться");
-    assert_eq!(storage.total_spend_usd().expect("сумма"), 0.0);
+    assert_eq!(
+        storage
+            .total_spend_usd(Provider::CheaperInference)
+            .expect("сумма"),
+        0.0
+    );
 }
 
 #[test]
@@ -258,7 +266,9 @@ fn non_finite_cost_is_excluded_from_spend() {
         storage.insert_history(&rec).expect("insert");
     }
 
-    let total = storage.total_spend_usd().expect("сумма расхода");
+    let total = storage
+        .total_spend_usd(Provider::CheaperInference)
+        .expect("сумма расхода");
     assert!(
         (total - 0.82).abs() < 1e-9,
         "non-finite стоимости исключены, ожидалось 0.82, получено {total}"
@@ -461,6 +471,7 @@ fn settings_round_trip_and_overwrite() {
         lang: Lang::En,
         theme: Theme::Dark,
         show_real_balance: true,
+        ..Settings::default()
     };
     storage.set_settings(&first).expect("set settings");
     assert_eq!(storage.get_settings().expect("get settings"), first);
@@ -470,6 +481,7 @@ fn settings_round_trip_and_overwrite() {
         lang: Lang::Ru,
         theme: Theme::Light,
         show_real_balance: false,
+        ..Settings::default()
     };
     storage.set_settings(&second).expect("перезапись настроек");
     assert_eq!(
@@ -484,7 +496,11 @@ fn settings_default_when_empty() {
     let storage = Storage::open_in_memory().expect("in-memory БД должна открыться");
     let got = storage.get_settings().expect("дефолтные настройки");
     assert_eq!(got.lang, Lang::Ru, "язык по умолчанию Ru");
-    assert_eq!(got.theme, Theme::System, "тема по умолчанию System");
+    assert_eq!(
+        got.theme,
+        Theme::Light,
+        "новая база использует светлую тему"
+    );
     assert_eq!(got.local_folder, "", "папка по умолчанию пустая");
     assert!(!got.show_real_balance, "реальный баланс по умолчанию скрыт");
 }
@@ -506,6 +522,7 @@ fn open_persists_history_and_settings_across_reopen() {
         lang: Lang::En,
         theme: Theme::Dark,
         show_real_balance: true,
+        ..Settings::default()
     };
     {
         let storage = Storage::open(&path).expect("open файла БД");
@@ -524,4 +541,80 @@ fn open_persists_history_and_settings_across_reopen() {
         settings,
         "настройки пережили переоткрытие"
     );
+}
+
+#[test]
+fn upgrades_an_existing_database_without_changing_jobs_or_preferences() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("legacy.db");
+    let legacy = rusqlite::Connection::open(&path).unwrap();
+    legacy
+        .execute_batch(
+            "
+        CREATE TABLE history (
+            id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+            kind TEXT NOT NULL, mode TEXT NOT NULL, model TEXT NOT NULL, prompt TEXT NOT NULL,
+            status TEXT NOT NULL, request_id TEXT, local_paths TEXT NOT NULL, cost_usd REAL,
+            params_json TEXT NOT NULL, error TEXT);
+        CREATE TABLE settings(id INTEGER PRIMARY KEY CHECK(id=1), json TEXT NOT NULL);
+        INSERT INTO history VALUES ('old',100,101,'video','text_to_video','veo','old prompt',
+            'pending','receipt-7','[]',0.36,'{}',NULL);
+    ",
+        )
+        .unwrap();
+    let old_settings = serde_json::json!({"local_folder":"C:/legacy","lang":"en","theme":"dark","show_real_balance":true});
+    legacy
+        .execute(
+            "INSERT INTO settings VALUES(1, ?1)",
+            [old_settings.to_string()],
+        )
+        .unwrap();
+    drop(legacy);
+    for _ in 0..2 {
+        let s = Storage::open(&path).unwrap();
+        let old = s.pending().unwrap().remove(0);
+        assert_eq!(old.provider, Provider::CheaperInference);
+        assert_eq!(old.id, "old");
+        assert_eq!(old.request_id.as_deref(), Some("receipt-7"));
+        assert_eq!(old.cost_usd, Some(0.36));
+        assert_eq!(s.total_spend_usd(Provider::CheaperInference).unwrap(), 0.36);
+        assert_eq!(s.total_spend_usd(Provider::OpenRouter).unwrap(), 0.0);
+        assert_eq!(old.params_json, "{}");
+        assert_eq!(old.updated_at, 101);
+        let mut old_ipc = serde_json::to_value(&old).unwrap();
+        old_ipc.as_object_mut().unwrap().remove("provider");
+        assert_eq!(
+            serde_json::from_value::<HistoryRecord>(old_ipc).unwrap(),
+            old
+        );
+        let got = s.get_settings().unwrap();
+        assert_eq!(got.local_folder, "C:/legacy");
+        assert_eq!(got.theme, Theme::Dark);
+        assert_eq!(got.lang, Lang::En);
+        assert!(got.show_real_balance);
+        assert_eq!(got.provider, Provider::CheaperInference);
+    }
+}
+
+#[test]
+fn old_settings_ipc_preserves_the_selected_provider_and_workspace() {
+    let s = Storage::open_in_memory().unwrap();
+    let mut prefs = Settings {
+        provider: Provider::OpenRouter,
+        ..Settings::default()
+    };
+    prefs.workspace.compact = true;
+    prefs.workspace.recent_count = 8;
+    s.set_settings(&prefs).unwrap();
+    let payload = serde_json::json!({"local_folder":"D:/renders","theme":"system","lang":"en","show_real_balance":true});
+    s.merge_settings(payload.as_object().unwrap().clone())
+        .unwrap();
+    let got = s.get_settings().unwrap();
+    assert_eq!(got.local_folder, "D:/renders");
+    assert_eq!(got.theme, Theme::System);
+    assert_eq!(got.provider, Provider::OpenRouter);
+    assert_eq!(got.workspace, prefs.workspace);
+    let bad = serde_json::json!({"provider":"unknown","local_folder":"wrong"});
+    assert!(s.merge_settings(bad.as_object().unwrap().clone()).is_err());
+    assert_eq!(s.get_settings().unwrap(), got);
 }

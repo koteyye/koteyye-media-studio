@@ -1,20 +1,22 @@
-//! Хранение API-ключа Cheaper Inference: системный keychain, не SQLite.
+//! Отдельные записи API-ключей провайдеров в системном keychain.
 //!
 //! [`KeyStore`] — интерфейс хранилища ключа; [`KeychainStore`] работает через
 //! системный keychain (macOS Keychain, Windows Credential Manager),
 //! [`InMemoryKeyStore`] — fallback для тестов. Ключ не попадает в БД настроек
 //! и истории: [`km_shared::Settings`] не содержит поля ключа.
 
+use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::Mutex;
 
 use keyring::Entry;
+use km_shared::Provider;
 
 /// Имя сервиса записи keychain (идентификатор приложения).
 const SERVICE: &str = "ru.koteyye.media-studio";
 
-/// Имя пользователя записи keychain — единственная запись ключа CI.
-const USER: &str = "ci-api-key";
+const CI_USER: &str = "ci-api-key";
+const OPENROUTER_USER: &str = "openrouter-api-key";
 
 /// Хранилище API-ключа: чтение, запись и удаление.
 ///
@@ -23,26 +25,33 @@ const USER: &str = "ci-api-key";
 /// keychain, отказ prompt) — `Err`: «ключа нет» и «ключ не прочитать» —
 /// разные причины, и путать их нельзя (ложный онбординг существующего юзера).
 pub trait KeyStore: Send + Sync {
+    /// Проверяет наличие записи, не отдавая вызывающему её содержимое.
+    fn has(&self, provider: Provider) -> Result<bool, String> {
+        Ok(self
+            .get(provider)?
+            .is_some_and(|key| !key.trim().is_empty()))
+    }
+
     /// Текущий ключ: `Ok(None)` — ключ не задан, `Err` — хранилище не читается.
     ///
     /// # Errors
     ///
     /// Строка с причиной, если доступ к хранилищу не удался.
-    fn get(&self) -> Result<Option<String>, String>;
+    fn get(&self, provider: Provider) -> Result<Option<String>, String>;
 
     /// Сохраняет ключ, перезаписывая предыдущий.
     ///
     /// # Errors
     ///
     /// Строка с причиной, если хранилище не приняло ключ.
-    fn set(&self, key: &str) -> Result<(), String>;
+    fn set(&self, provider: Provider, key: &str) -> Result<(), String>;
 
     /// Удаляет ключ; отсутствие записи не считается ошибкой.
     ///
     /// # Errors
     ///
     /// Строка с причиной, если удаление не удалось.
-    fn delete(&self) -> Result<(), String>;
+    fn delete(&self, provider: Provider) -> Result<(), String>;
 }
 
 /// Системный keychain через крейт `keyring`.
@@ -54,25 +63,48 @@ pub trait KeyStore: Send + Sync {
 /// валидным ключом попал бы в онбординг.
 #[derive(Debug)]
 pub struct KeychainStore {
-    entry: Entry,
+    ci: Entry,
+    openrouter: Entry,
 }
 
 impl KeychainStore {
-    /// Открывает запись keychain для ключа CI.
+    /// Готовит идентификаторы записей для обоих сервисов без чтения секретов.
     ///
     /// # Errors
     ///
     /// Строка с причиной, если запись keychain не создаётся.
     pub fn new() -> Result<KeychainStore, String> {
-        let entry = Entry::new(SERVICE, USER)
-            .map_err(|e| format!("не удалось открыть запись keychain: {e}"))?;
-        Ok(KeychainStore { entry })
+        let entry = |user| {
+            Entry::new(SERVICE, user)
+                .map_err(|e| format!("не удалось открыть запись keychain: {e}"))
+        };
+        Ok(Self {
+            ci: entry(CI_USER)?,
+            openrouter: entry(OPENROUTER_USER)?,
+        })
+    }
+
+    fn entry(&self, provider: Provider) -> &Entry {
+        match provider {
+            Provider::CheaperInference => &self.ci,
+            Provider::OpenRouter => &self.openrouter,
+        }
     }
 }
 
 impl KeyStore for KeychainStore {
-    fn get(&self) -> Result<Option<String>, String> {
-        match self.entry.get_password() {
+    fn has(&self, provider: Provider) -> Result<bool, String> {
+        match self.entry(provider).get_attributes() {
+            Ok(_) => Ok(true),
+            Err(keyring::Error::NoEntry) => Ok(false),
+            Err(e) => Err(format!(
+                "не удалось проверить наличие ключа в keychain: {e}"
+            )),
+        }
+    }
+
+    fn get(&self, provider: Provider) -> Result<Option<String>, String> {
+        match self.entry(provider).get_password() {
             Ok(key) => Ok(Some(key)),
             Err(keyring::Error::NoEntry) => Ok(None),
             // «Ключа нет» и «keychain недоступен» — разные причины: ошибка
@@ -81,14 +113,14 @@ impl KeyStore for KeychainStore {
         }
     }
 
-    fn set(&self, key: &str) -> Result<(), String> {
-        self.entry
+    fn set(&self, provider: Provider, key: &str) -> Result<(), String> {
+        self.entry(provider)
             .set_password(key)
             .map_err(|e| format!("не удалось сохранить ключ в keychain: {e}"))
     }
 
-    fn delete(&self) -> Result<(), String> {
-        match self.entry.delete_credential() {
+    fn delete(&self, provider: Provider) -> Result<(), String> {
+        match self.entry(provider).delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(e) => Err(format!("не удалось удалить ключ из keychain: {e}")),
         }
@@ -101,28 +133,32 @@ impl KeyStore for KeychainStore {
 /// [`KeychainStore`].
 #[derive(Default)]
 pub struct InMemoryKeyStore {
-    key: Mutex<Option<String>>,
-}
-
-impl InMemoryKeyStore {
-    /// Захватывает ключ; отравление мьютекса фатально.
-    fn lock(&self) -> MutexGuard<'_, Option<String>> {
-        self.key.lock().expect("мьютекс ключа отравлен")
-    }
+    keys: Mutex<HashMap<Provider, String>>,
 }
 
 impl KeyStore for InMemoryKeyStore {
-    fn get(&self) -> Result<Option<String>, String> {
-        Ok(self.lock().clone())
+    fn get(&self, provider: Provider) -> Result<Option<String>, String> {
+        Ok(self
+            .keys
+            .lock()
+            .expect("мьютекс ключей отравлен")
+            .get(&provider)
+            .cloned())
     }
 
-    fn set(&self, key: &str) -> Result<(), String> {
-        *self.lock() = Some(key.to_owned());
+    fn set(&self, provider: Provider, key: &str) -> Result<(), String> {
+        self.keys
+            .lock()
+            .expect("мьютекс ключей отравлен")
+            .insert(provider, key.to_owned());
         Ok(())
     }
 
-    fn delete(&self) -> Result<(), String> {
-        *self.lock() = None;
+    fn delete(&self, provider: Provider) -> Result<(), String> {
+        self.keys
+            .lock()
+            .expect("мьютекс ключей отравлен")
+            .remove(&provider);
         Ok(())
     }
 }
@@ -131,7 +167,14 @@ impl KeyStore for InMemoryKeyStore {
 impl fmt::Debug for InMemoryKeyStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("InMemoryKeyStore")
-            .field("key_set", &self.lock().is_some())
+            .field(
+                "key_set",
+                &!self
+                    .keys
+                    .lock()
+                    .expect("мьютекс ключей отравлен")
+                    .is_empty(),
+            )
             .finish()
     }
 }
@@ -149,21 +192,26 @@ mod tests {
 
     #[test]
     fn in_memory_store_roundtrip() {
+        let ci = Provider::CheaperInference;
+        let or = Provider::OpenRouter;
         let store = InMemoryKeyStore::default();
-        assert_eq!(store.get().expect("get"), None, "изначально ключа нет");
-        store.set("ci_live_x").expect("set");
-        assert_eq!(store.get().expect("get").as_deref(), Some("ci_live_x"));
-        store.set("ci_live_y").expect("перезапись");
-        assert_eq!(store.get().expect("get").as_deref(), Some("ci_live_y"));
-        store.delete().expect("delete");
-        assert_eq!(store.get().expect("get"), None);
-        store.delete().expect("повторное удаление не ошибка");
+        assert_eq!(store.get(ci).expect("get"), None);
+        store.set(ci, "ci_live_x").expect("set");
+        store.set(or, "router-test").expect("set");
+        store.set(ci, "ci_live_y").expect("перезапись");
+        assert_eq!(store.get(ci).expect("get").as_deref(), Some("ci_live_y"));
+        store.delete(ci).expect("delete");
+        assert_eq!(store.get(ci).expect("get"), None);
+        store.delete(ci).expect("повторное удаление не ошибка");
+        assert_eq!(store.get(or).unwrap().as_deref(), Some("router-test"));
     }
 
     #[test]
     fn debug_does_not_leak_key() {
         let store = InMemoryKeyStore::default();
-        store.set("ci_live_secret").expect("set");
+        store
+            .set(Provider::CheaperInference, "ci_live_secret")
+            .expect("set");
         let debug = format!("{store:?}");
         assert!(
             !debug.contains("ci_live_secret"),

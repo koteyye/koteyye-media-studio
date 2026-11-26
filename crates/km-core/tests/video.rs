@@ -24,7 +24,10 @@ fn video_request() -> GenerationRequest {
         mode: GenMode::TextToVideo,
         model: "veo-3.1-generate-001".to_owned(),
         prompt: "кот плывёт на плоту".to_owned(),
-        params: GenParams::default(),
+        params: GenParams {
+            duration_seconds: Some(6.0),
+            ..GenParams::default()
+        },
         references: Vec::new(),
         mask_data_url: None,
     }
@@ -52,6 +55,7 @@ fn completed_video_response() -> Value {
 fn generation_json() -> Value {
     json!({
         "request_id": "uuid",
+        "object": "generation",
         "endpoint": "/v1/videos/generations",
         "created_at": "2026-11-24T10:00:00Z",
         "expires_at": "2026-12-01T10:00:00Z",
@@ -61,6 +65,7 @@ fn generation_json() -> Value {
             "content_type": "video/mp4",
             "size_bytes": 1_048_576,
             "url": "https://cdn.example.com/signed/v.mp4?sig=abc",
+            "url_expires_at": "2026-11-24T11:00:00Z",
         }],
     })
 }
@@ -129,13 +134,14 @@ async fn generate_t2v_sends_params_and_parses_completed_response() {
 #[tokio::test]
 async fn generate_t2v_omits_absent_params_and_image_fields() {
     let server = MockServer::start().await;
-    // Параметры не заданы — в теле только model и prompt: без null-полей
+    // В теле только обязательные поля: без null-полей
     // и без image_url/input_references (t2v не использует картинки).
     let guard = Mock::given(method("POST"))
         .and(path("/v1/videos/generations"))
         .and(body_json(json!({
             "model": "veo-3.1-generate-001",
             "prompt": "кот плывёт на плоту",
+            "duration_seconds": 6.0,
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(completed_video_response()))
         .expect(1)
@@ -161,6 +167,7 @@ async fn generate_i2v_sends_first_reference_as_image_url() {
         .and(body_json(json!({
             "model": "kling-v3.0-i2v",
             "prompt": "кот плывёт на плоту",
+            "duration_seconds": 6.0,
             "image_url": "data:image/png;base64,aGk=",
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(completed_video_response()))
@@ -192,6 +199,7 @@ async fn generate_r2v_sends_all_references_as_input_references() {
         .and(body_json(json!({
             "model": "wan-v2.7-r2v",
             "prompt": "кот плывёт на плоту",
+            "duration_seconds": 6.0,
             "input_references": [
                 "data:image/png;base64,aGk=",
                 "data:image/png;base64,b2k=",
@@ -362,7 +370,7 @@ async fn empty_request_id_fails_before_http() {
     let server = MockServer::start().await;
     let client = client_for(&server);
 
-    for request_id in ["", "   "] {
+    for request_id in ["", "   ", "../account/balance", "a/b", "id?x=y", "#id"] {
         let err = client
             .generation(request_id)
             .await
@@ -464,4 +472,92 @@ async fn generation_unknown_request_id_maps_to_http_404() {
         matches!(err, CoreError::Http { status: 404, .. }),
         "ожидался Http{{404}}, получено: {err:?}"
     );
+}
+
+#[tokio::test]
+async fn invalid_duration_or_number_of_videos_is_rejected_before_the_paid_request() {
+    let server = MockServer::start().await;
+    let client = client_for(&server);
+    for seconds in [
+        None,
+        Some(-1.0),
+        Some(0.0),
+        Some(f64::NAN),
+        Some(f64::INFINITY),
+    ] {
+        let mut req = video_request();
+        req.params.duration_seconds = seconds;
+        assert!(matches!(
+            client.generate_video(&req).await,
+            Err(CoreError::Validation(_))
+        ));
+    }
+    for n in [0, 11] {
+        let mut req = video_request();
+        req.params.n = Some(n);
+        assert!(matches!(
+            client.generate_video(&req).await,
+            Err(CoreError::Validation(_))
+        ));
+    }
+    assert!(received(&server).await.is_empty());
+}
+
+#[tokio::test]
+async fn generation_rejects_results_for_a_different_receipt() {
+    let server = MockServer::start().await;
+    let id = "78c93671-645f-40b9-bff3-9d120038a71a";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/generations/{id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(generation_json()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert!(matches!(
+        client_for(&server).generation(id).await,
+        Err(CoreError::Serde(_))
+    ));
+}
+
+#[tokio::test]
+async fn veo_uses_its_model_limits_without_restricting_other_models() {
+    let server = MockServer::start().await;
+    let client = client_for(&server);
+    for (mode, duration, count, ratio) in [
+        (GenMode::TextToVideo, 5.0, 1, "16:9"),
+        (GenMode::ReferenceToVideo, 6.0, 1, "9:16"),
+        (GenMode::ImageToVideo, 4.0, 5, "16:9"),
+        (GenMode::TextToVideo, 8.0, 4, "1:1"),
+    ] {
+        let mut req = video_request();
+        req.mode = mode;
+        req.references = vec![reference("https://example.com/frame.png")];
+        req.params.duration_seconds = Some(duration);
+        req.params.n = Some(count);
+        req.params.aspect_ratio = Some(ratio.into());
+        assert!(matches!(
+            client.generate_video(&req).await,
+            Err(CoreError::Validation(_))
+        ));
+    }
+    assert!(received(&server).await.is_empty());
+    Mock::given(method("POST"))
+        .and(path("/v1/videos/generations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completed_video_response()))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let mut req = video_request();
+    req.mode = GenMode::ReferenceToVideo;
+    req.references = vec![reference("https://example.com/frame.png")];
+    req.params.duration_seconds = Some(8.0);
+    req.params.n = Some(4);
+    client.generate_video(&req).await.unwrap();
+    req.mode = GenMode::TextToVideo;
+    req.model = "other-video-model".into();
+    req.references.clear();
+    req.params.duration_seconds = Some(5.0);
+    req.params.n = Some(7);
+    req.params.aspect_ratio = Some("1:1".into());
+    client.generate_video(&req).await.unwrap();
 }

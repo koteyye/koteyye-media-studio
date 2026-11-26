@@ -1,17 +1,14 @@
 //! Аудио Cheaper Inference: озвучка, музыка и звуковые эффекты.
 //!
-//! Все три режима ([`GenMode::Speech`], [`GenMode::Music`],
-//! [`GenMode::SoundEffects`]) ходят в один эндпоинт `POST /v1/audio/speech`;
-//! различается только набор параметров тела. Ответ бинарный (mp3/wav),
-//! стоимость приходит в заголовке `x-ci-billed-cost-usd`. Валидация input
-//! выполняется до HTTP-запроса; опциональные параметры не отправляются,
-//! если не заданы.
+//! У трёх режимов один эндпоинт `POST /v1/audio/speech` и бинарный ответ.
+//! SpeechRequest документирует model/input и необязательные voice, format,
+//! speed. Длительность для моделей музыки и эффектов шлюз не публикует.
 
 use km_shared::{AudioOutput, GenMode, GenerationRequest};
 use reqwest::header::HeaderMap;
 use serde::Serialize;
 
-use crate::client::CiClient;
+use crate::client::{CiClient, billed_cost_from_headers, request_id_from_headers, with_receipt};
 use crate::error::CoreError;
 
 /// Эндпоинт генерации аудио: общий для озвучки, музыки и эффектов.
@@ -20,19 +17,7 @@ const SPEECH_PATH: &str = "/v1/audio/speech";
 /// Лимит input в символах (контракт CI: 1–4096).
 const MAX_INPUT_CHARS: usize = 4096;
 
-/// Формат ответа озвучки по умолчанию (контракт CI).
-const DEFAULT_RESPONSE_FORMAT: &str = "mp3";
-
-/// MIME-тип по умолчанию, если CI не прислал заголовок Content-Type.
-const DEFAULT_CONTENT_TYPE: &str = "audio/mpeg";
-
-/// Заголовок CI со стоимостью генерации: строка USD с 6 знаками.
-const BILLED_COST_HEADER: &str = "x-ci-billed-cost-usd";
-
 /// Тело `POST /v1/audio/speech`; отсутствующие поля не сериализуются.
-///
-/// Набор полей зависит от режима: озвучка шлёт `voice`, `response_format`
-/// и `speed`; музыка и эффекты — `duration_seconds`. Лишние поля не уходят.
 #[derive(Serialize)]
 struct AudioBody<'a> {
     model: &'a str,
@@ -43,19 +28,14 @@ struct AudioBody<'a> {
     response_format: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     speed: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    duration_seconds: Option<f64>,
 }
 
 impl CiClient {
     /// Генерация аудио: `POST /v1/audio/speech` для озвучки, музыки и эффектов.
     ///
-    /// Промпт уходит полем `input`. Для озвучки добавляются `voice`,
-    /// `response_format` (по умолчанию `mp3`) и `speed`; для музыки и
-    /// эффектов — `duration_seconds`, если задан. Голос, скорость и формат
-    /// в режимах музыки/эффектов не отправляются. Ответ — бинарные байты,
-    /// MIME-тип из заголовка Content-Type и стоимость из
-    /// `x-ci-billed-cost-usd`.
+    /// Настройки озвучки передаём при явном выборе. Для музыки и эффектов
+    /// требуются model/input. В выборке истории могут остаться старые
+    /// duration_seconds: шлюз не гарантирует их поддержку в SpeechRequest.
     ///
     /// # Errors
     ///
@@ -68,15 +48,18 @@ impl CiClient {
             GenMode::Speech => AudioBody {
                 model: &req.model,
                 input: &req.prompt,
-                voice: req.params.voice.as_deref(),
-                response_format: Some(
-                    req.params
-                        .response_format
-                        .as_deref()
-                        .unwrap_or(DEFAULT_RESPONSE_FORMAT),
-                ),
+                voice: req
+                    .params
+                    .voice
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty()),
+                response_format: req
+                    .params
+                    .response_format
+                    .as_deref()
+                    .filter(|s| !s.is_empty()),
                 speed: req.params.speed,
-                duration_seconds: None,
             },
             GenMode::Music | GenMode::SoundEffects => AudioBody {
                 model: &req.model,
@@ -84,7 +67,6 @@ impl CiClient {
                 voice: None,
                 response_format: None,
                 speed: None,
-                duration_seconds: req.params.duration_seconds,
             },
             other => {
                 return Err(CoreError::Validation(format!(
@@ -93,10 +75,13 @@ impl CiClient {
             }
         };
         let (bytes, headers) = self.post_bytes(SPEECH_PATH, &body).await?;
+        let content_type = audio_content_type(&headers, &bytes, body.response_format)
+            .map_err(|error| with_receipt(error, &headers))?;
         Ok(AudioOutput {
+            request_id: request_id_from_headers(&headers),
             bytes,
-            content_type: content_type(&headers),
-            cost_usd: billed_cost(&headers),
+            content_type,
+            cost_usd: billed_cost_from_headers(&headers),
         })
     }
 }
@@ -112,24 +97,66 @@ fn validate_input(req: &GenerationRequest) -> Result<(), CoreError> {
             "input длиннее {MAX_INPUT_CHARS} символов: {len}"
         )));
     }
+    if req.mode == GenMode::Speech
+        && let Some(speed) = req.params.speed
+        && (!speed.is_finite() || speed <= 0.0)
+    {
+        return Err(CoreError::Validation(
+            "скорость озвучки должна быть положительной".to_owned(),
+        ));
+    }
     Ok(())
 }
 
-/// MIME-тип из заголовка Content-Type; без него — дефолт для mp3.
-fn content_type(headers: &HeaderMap) -> String {
-    headers
+/// OpenAPI допускает application/octet-stream. В этом случае контейнер
+/// определяет расширение; для PCM без заголовка опираемся на запрошенный формат.
+fn audio_content_type(
+    headers: &HeaderMap,
+    bytes: &[u8],
+    format: Option<&str>,
+) -> Result<String, CoreError> {
+    if bytes.is_empty() {
+        return Err(CoreError::Serde(
+            "CI вернул пустой результат: аудио".to_owned(),
+        ));
+    }
+    let mime = headers
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .unwrap_or(DEFAULT_CONTENT_TYPE)
-        .to_owned()
-}
-
-/// Стоимость из заголовка `x-ci-billed-cost-usd`; `None`, если нет или не парсится.
-fn billed_cost(headers: &HeaderMap) -> Option<f64> {
-    headers
-        .get(BILLED_COST_HEADER)?
-        .to_str()
-        .ok()?
-        .parse::<f64>()
-        .ok()
+        .unwrap_or_default()
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    match mime.as_str() {
+        mime if mime.starts_with("audio/") => return Ok(mime.to_owned()),
+        "application/ogg" => return Ok("audio/ogg".into()),
+        "" | "application/octet-stream" | "binary/octet-stream" => {}
+        other => return Err(CoreError::Serde(format!("CI вернул {other} вместо аудио"))),
+    }
+    let mime = if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WAVE") {
+        "audio/wav"
+    } else if bytes.starts_with(b"OggS") {
+        "audio/ogg"
+    } else if bytes.starts_with(b"fLaC") {
+        "audio/flac"
+    } else if bytes.get(4..8) == Some(b"ftyp") {
+        "audio/mp4"
+    } else if matches!(bytes, [0xff,b,..] if b & 0xf6 == 0xf0) {
+        "audio/aac"
+    } else if bytes.starts_with(b"ID3") || matches!(bytes, [0xff,b,..] if b & 0xe0 == 0xe0) {
+        "audio/mpeg"
+    } else {
+        match format {
+            Some("wav") => "audio/wav",
+            Some("opus") => "audio/opus",
+            Some("aac") => "audio/aac",
+            Some("flac") => "audio/flac",
+            Some("pcm") => "audio/pcm",
+            Some("mp3") | None => "audio/mpeg",
+            _ => "application/octet-stream",
+        }
+    };
+    Ok(mime.to_owned())
 }

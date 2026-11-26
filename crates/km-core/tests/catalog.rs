@@ -50,6 +50,7 @@ fn model(id: &str, model_type: &str, endpoints: &[&str], features: &[&str]) -> C
         "id": id,
         "model_type": model_type,
         "supported_endpoints": endpoints,
+        "supports_image_edit": endpoints.contains(&"/v1/images/edits"),
         "features": features,
     }))
     .expect("синтетическая модель должна десериализоваться")
@@ -313,10 +314,7 @@ fn for_mode_text_modes_select_by_model_type() {
         "TextToImage — только image-тип, без video/speech"
     );
     let t2v = for_mode(&models, GenMode::TextToVideo);
-    assert_eq!(
-        ids(&t2v),
-        ["kling-v3.0-i2v", "veo-3.1-generate-001", "wan-v2.7-r2v"]
-    );
+    assert_eq!(ids(&t2v), ["veo-3.1-generate-001"]);
     assert!(
         t2v.iter().all(|m| m.model_type == ModelType::Video),
         "TextToVideo — только video-тип"
@@ -329,7 +327,7 @@ fn for_mode_image_to_video_is_video_only_with_image_input() {
     let got = for_mode(&models, GenMode::ImageToVideo);
     assert_eq!(
         ids(&got),
-        ["kling-v3.0-i2v", "veo-3.1-generate-001", "wan-v2.7-r2v"],
+        ["kling-v3.0-i2v", "veo-3.1-generate-001"],
         "ImageToVideo — только video-модели с image-input"
     );
     // Регрессия: image-модели тоже имеют фичу image-input, но не должны попадать в i2v.
@@ -358,11 +356,11 @@ fn for_mode_image_edit_requires_image_type() {
 }
 
 #[test]
-fn for_mode_reference_to_video_accepts_r2v_id_or_image_input() {
+fn reference_to_video_requires_reference_support() {
     let models = vec![
         // r2v в id без feature image-input — подходит по маркеру id.
         model("wan-v2.7-r2v", "video", &["/v1/videos/generations"], &[]),
-        // feature image-input — подходит по возможности.
+        // i2v принимает первый кадр, но не список референсов.
         model(
             "kling-v3.0-i2v",
             "video",
@@ -381,7 +379,7 @@ fn for_mode_reference_to_video_accepts_r2v_id_or_image_input() {
     ];
     assert_eq!(
         ids(&for_mode(&models, GenMode::ReferenceToVideo)),
-        ["wan-v2.7-r2v", "kling-v3.0-i2v"]
+        ["wan-v2.7-r2v"]
     );
 }
 
@@ -391,8 +389,8 @@ fn for_mode_reference_to_video_on_fixture_excludes_image_models() {
     let got = for_mode(&models, GenMode::ReferenceToVideo);
     assert_eq!(
         ids(&got),
-        ["kling-v3.0-i2v", "veo-3.1-generate-001", "wan-v2.7-r2v"],
-        "ReferenceToVideo — video-модели с image-input или r2v в id"
+        ["veo-3.1-generate-001", "wan-v2.7-r2v"],
+        "ReferenceToVideo — модели с поддержкой референсов"
     );
     assert!(
         got.iter().any(|m| m.id == "wan-v2.7-r2v"),
@@ -426,4 +424,87 @@ fn for_mode_audio_modes_split_speech_music_and_effects() {
         ids(&for_mode(&models, GenMode::SoundEffects)),
         ["sound-effects-v2"]
     );
+}
+
+#[tokio::test]
+async fn authenticated_catalog_uses_key_specific_endpoints_and_prices() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header("authorization", "Bearer ci_live_test"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(include_str!(
+            "../../km-shared/tests/fixtures/v1-models.json"
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let models = client_for(&server).models().await.unwrap();
+    assert_eq!(models.len(), 3);
+    assert_eq!(
+        models[0].provider_name.as_deref(),
+        Some("Black Forest Labs")
+    );
+    assert!(models[0].supports_mode(GenMode::TextToImage));
+    assert!(!models[0].supports_mode(GenMode::ImageEdit));
+    assert!(!models[0].supports_image_edit);
+    assert!(!models[0].has_feature("image-edit"));
+    assert_eq!(models[1].model_type, ModelType::Video);
+    assert!(models[1].supports_mode(GenMode::ImageToVideo));
+    assert_eq!(models[1].price_for("720P"), Some(0.049));
+    assert_eq!(models[1].media_unit.as_deref(), Some("second"));
+    assert_eq!(models[1].discount_percent.as_deref(), Some("30.00"));
+    let rate = &models[2].pricing_scopes.as_ref().unwrap()[0].tiers[0]
+        .rates
+        .characters;
+    assert_eq!(rate.as_deref(), Some("0.000008500000000000000000"));
+}
+
+#[tokio::test]
+async fn key_check_does_not_parse_individual_model_schemas() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(wiremock::matchers::query_param("type", "decision"))
+        .and(header("authorization", "Bearer ci_live_test"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"object":"list", "data":[{"new_property":true}]})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    client_for(&server).verify_key().await.unwrap();
+}
+
+#[test]
+fn video_specializations_and_restricted_endpoints_are_respected() {
+    let video = |id| model(id, "video", &["/v1/videos/generations"], &["image-input"]);
+    assert!(!video("kling-v2.6-t2v").supports_mode(GenMode::ImageToVideo));
+    assert!(!video("veo-3.1-lite-generate-001").supports_mode(GenMode::ReferenceToVideo));
+    for mode in [
+        GenMode::TextToVideo,
+        GenMode::ImageToVideo,
+        GenMode::ReferenceToVideo,
+    ] {
+        assert!(!video("kling-v2.6-motion-control").supports_mode(mode));
+        assert!(!video("proteus").supports_mode(mode));
+    }
+    assert!(
+        !model("edits-only", "image", &["/v1/images/edits"], &[])
+            .supports_mode(GenMode::TextToImage)
+    );
+}
+
+#[tokio::test]
+async fn explicit_failed_edit_capability_excludes_model_even_when_endpoint_is_listed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[{
+            "id":"image", "type":"image", "supported_endpoints":["/v1/images/edits"],
+            "capabilities":{"image_edit":false}
+        }]})))
+        .mount(&server)
+        .await;
+    assert!(!client_for(&server).models().await.unwrap()[0].supports_mode(GenMode::ImageEdit));
 }

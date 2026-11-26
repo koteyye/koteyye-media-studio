@@ -18,6 +18,9 @@
 use dioxus::prelude::*;
 use km_shared::Settings as AppSettings;
 
+#[cfg(test)]
+use crate::components::key_status::key_status;
+use crate::components::key_status::{KeyStatus, KeyStatusView, check_connection, save_key};
 use crate::ipc;
 use crate::router::Route;
 use crate::state::{AppState, lang_name, parse_lang, use_t};
@@ -64,36 +67,6 @@ impl Step {
             Step::Folder => Some(Step::Key),
             Step::Done => Some(Step::Folder),
         }
-    }
-}
-
-/// Статус проверки подключения на шаге ключа.
-///
-/// Семантика как в Настройках: принятый ключ, отсутствие/401, непроверенное
-/// соединение (сеть/5xx) и ошибка keychain — разные причины для пользователя.
-#[derive(Clone, Debug, PartialEq)]
-enum KeyStatus {
-    /// Ключ ещё не сохранялся.
-    Idle,
-    /// Идёт запрос проверки.
-    Checking,
-    /// Ключ принят (`test_connection` → `true`).
-    Ok,
-    /// Ключа нет или CI ответил 401 (`test_connection` → `false`).
-    Rejected,
-    /// Подключение не проверено: сеть/5xx или сбой чтения keychain
-    /// (`test_connection` → `Err`).
-    Unverified(String),
-    /// Keychain не принял ключ (`set_api_key` → `Err`).
-    KeychainError(String),
-}
-
-/// Переводит результат [`crate::ipc::test_connection`] в статус шага ключа.
-fn key_status(result: Result<bool, String>) -> KeyStatus {
-    match result {
-        Ok(true) => KeyStatus::Ok,
-        Ok(false) => KeyStatus::Rejected,
-        Err(e) => KeyStatus::Unverified(e),
     }
 }
 
@@ -148,12 +121,9 @@ pub fn Onboarding() -> Element {
     let folder_missing_label = use_t("settings.folder_missing");
     let save_label = use_t("common.save");
     let check_label = use_t("settings.check_connection");
-    let checking_label = use_t("settings.checking");
     let ok_label = use_t("settings.connection_ok");
-    let failed_label = use_t("settings.connection_failed");
     let rejected_label = use_t("settings.connection_rejected");
     let unverified_label = use_t("settings.connection_unverified");
-    let keychain_label = use_t("settings.keychain_error");
     let error_label = use_t("common.error");
     let close_label = use_t("common.close");
 
@@ -164,7 +134,7 @@ pub fn Onboarding() -> Element {
     let mut step = use_signal(|| Step::Welcome);
     let mut key_input = use_signal(String::new);
     let key_busy = use_signal(|| false);
-    let status = use_signal(|| KeyStatus::Idle);
+    let mut status = use_signal(|| KeyStatus::Idle);
     let mut key_skipped = use_signal(|| false);
     let mut folder = use_signal(move || initial_folder);
     let mut folder_busy = use_signal(|| false);
@@ -172,7 +142,7 @@ pub fn Onboarding() -> Element {
 
     let current_step = (step)();
     let lang = (state.lang)();
-    let error = (state.error)();
+    let error = (state.error)().or_else(|| (state.background_error)());
     let key_busy_value = (key_busy)();
     let folder_busy_value = (folder_busy)();
     let finishing_value = (finishing)();
@@ -180,14 +150,16 @@ pub fn Onboarding() -> Element {
     let key_status_value = (status)();
     let key_skipped_value = (key_skipped)();
     let folder_value = (folder)();
-    let key_can_proceed = key_step_can_proceed(&key_status_value);
+    let key_can_proceed =
+        key_input_value.trim().is_empty() && key_step_can_proceed(&key_status_value);
     let folder_can_proceed = folder_step_can_proceed(&folder_value);
 
     // Индикатор прогресса: точки шагов + счётчик «N / 4» (без перевода).
     let steps_view = rsx! {
-        div { class: "onboarding-steps", aria_hidden: "true",
+        div { class: "onboarding-steps", aria_live: "polite",
             for s in [Step::Welcome, Step::Key, Step::Folder, Step::Done] {
                 span {
+                    aria_hidden: "true",
                     class: if s == current_step {
                         "onboarding-dot active"
                     } else if s.number() < current_step.number() {
@@ -199,26 +171,6 @@ pub fn Onboarding() -> Element {
             }
             span { class: "onboarding-step-count", "{current_step.number()} / 4" }
         }
-    };
-
-    // Статус проверки ключа — отдельный Element, чтобы не ветвить хуки внутри rsx.
-    let key_status_view = match &key_status_value {
-        KeyStatus::Idle => rsx! {},
-        KeyStatus::Checking => rsx! {
-            p { class: "status status-muted", {checking_label} }
-        },
-        KeyStatus::Ok => rsx! {
-            p { class: "status status-ok", "✓ " {ok_label} }
-        },
-        KeyStatus::Rejected => rsx! {
-            p { class: "status status-error", {failed_label} ": " {rejected_label} }
-        },
-        KeyStatus::Unverified(e) => rsx! {
-            p { class: "status status-error", {unverified_label} ": " {e.as_str()} }
-        },
-        KeyStatus::KeychainError(e) => rsx! {
-            p { class: "status status-error", {keychain_label} ": " {e.as_str()} }
-        },
     };
 
     // Итог шага ключа для финального экрана: принят / не проверен / пропущен.
@@ -285,7 +237,7 @@ pub fn Onboarding() -> Element {
                     placeholder: key_label,
                     value: "{key_input_value}",
                     disabled: key_busy_value,
-                    oninput: move |evt| key_input.set(evt.value()),
+                    oninput: move |evt| { key_input.set(evt.value()); status.set(KeyStatus::Idle); },
                 }
                 button {
                     class: "btn btn-primary",
@@ -293,7 +245,9 @@ pub fn Onboarding() -> Element {
                     onclick: move |_| {
                         let key = (key_input)();
                         spawn(async move {
-                            save_key(key, key_input, key_busy, status, key_skipped).await;
+                            if save_key(state, key, key_input, key_busy, status).await {
+                                key_skipped.set(false);
+                            }
                         });
                     },
                     {save_label}
@@ -302,12 +256,13 @@ pub fn Onboarding() -> Element {
                     class: "btn",
                     disabled: key_busy_value,
                     onclick: move |_| {
-                        spawn(async move { check_connection(key_busy, status).await });
+                        let candidate = key_input.peek().clone();
+                            spawn(async move { check_connection(Some(candidate), key_busy, status).await });
                     },
                     {check_label}
                 }
             }
-            {key_status_view}
+            KeyStatusView { status: key_status_value.clone(), draft: !key_input_value.trim().is_empty() }
             p { class: "onboarding-hint", {skip_key_warning} }
         },
         Step::Folder => rsx! {
@@ -448,7 +403,7 @@ pub fn Onboarding() -> Element {
     rsx! {
         div { class: "onboarding",
             div { class: "onboarding-card",
-                div { class: "onboarding-brand", "Koteyye Media Studio" }
+                div { class: "onboarding-brand", img { src: asset!("/assets/icons/koteyye_media_studio_logo.png"), alt: "", width: "33", height: "33" } "Koteyye Media Studio v2" }
                 {steps_view}
                 // Экран вне Layout: баннер ошибки IPC показываем здесь.
                 if let Some(message) = error {
@@ -458,7 +413,7 @@ pub fn Onboarding() -> Element {
                             class: "banner-dismiss",
                             title: close_label,
                             aria_label: close_label,
-                            onclick: move |_| state.set_error(None),
+                            onclick: move |_| state.dismiss_error(),
                             "✕"
                         }
                     }
@@ -466,41 +421,6 @@ pub fn Onboarding() -> Element {
                 {step_view}
                 div { class: "onboarding-actions", {actions} }
             }
-        }
-    }
-}
-
-/// Проверяет соединение сохранившимся ключом и обновляет статус шага.
-///
-/// Блокирует кнопки ключа на время запроса (`key_busy`).
-async fn check_connection(mut key_busy: Signal<bool>, mut status: Signal<KeyStatus>) {
-    key_busy.set(true);
-    status.set(KeyStatus::Checking);
-    status.set(key_status(ipc::test_connection().await));
-    key_busy.set(false);
-}
-
-/// Сохраняет ключ в keychain; при успехе очищает поле, снимает пропуск и проверяет.
-///
-/// Ошибка keychain показывается как [`KeyStatus::KeychainError`] — поле не
-/// очищается, чтобы ключ можно было ввести повторно.
-async fn save_key(
-    key: String,
-    mut key_input: Signal<String>,
-    mut key_busy: Signal<bool>,
-    mut status: Signal<KeyStatus>,
-    mut key_skipped: Signal<bool>,
-) {
-    key_busy.set(true);
-    match ipc::set_api_key(&key).await {
-        Ok(()) => {
-            key_input.set(String::new());
-            key_skipped.set(false);
-            check_connection(key_busy, status).await;
-        }
-        Err(e) => {
-            status.set(KeyStatus::KeychainError(e));
-            key_busy.set(false);
         }
     }
 }
@@ -521,9 +441,13 @@ async fn finish(mut state: AppState, folder: Signal<String>, mut finishing: Sign
     };
     if state.persist_settings(next).await.is_ok() {
         state.onboarding_done.set(true);
-        navigator().replace(Route::Studio {
-            kind: "image".to_owned(),
-        });
+        let settings = state.settings.peek();
+        navigator().replace(Route::studio(
+            settings
+                .workspace
+                .startup
+                .unwrap_or(settings.workspace.last_kind),
+        ));
     } else {
         finishing.set(false);
     }

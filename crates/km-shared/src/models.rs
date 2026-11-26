@@ -9,9 +9,41 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::{GenMode, MediaKind};
+
 /// Цены медиа-генерации: ключ вида `720P+AUDIO` → цена в USD за единицу
 /// (секунда/символ/изображение — по `media_unit`), строкой с 6 знаками после запятой.
 pub type MediaPrices = BTreeMap<String, String>;
+
+/// Опубликованные ставки отдельных единиц тарификации.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CatalogRates {
+    pub images: Option<String>,
+    pub characters: Option<String>,
+    pub seconds: Option<String>,
+    pub input_tokens: Option<String>,
+    pub output_tokens: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CatalogTier {
+    #[serde(default)]
+    pub rates: CatalogRates,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CatalogPriceSelector {
+    pub protocol: Option<String>,
+    #[serde(rename = "pricingVariant", alias = "pricing_variant")]
+    pub pricing_variant: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CatalogPricingScope {
+    pub scope: Option<CatalogPriceSelector>,
+    #[serde(default)]
+    pub tiers: Vec<CatalogTier>,
+}
 
 /// Тип модели в каталоге CI; неизвестные типы сохраняются в [`ModelType::Unknown`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -92,10 +124,14 @@ impl<'de> Deserialize<'de> for ModelType {
 pub struct CatalogModel {
     /// Идентификатор модели, например `veo-3.1-generate-001`.
     pub id: String,
+    /// Человекочитаемое имя, если провайдер его прислал.
+    #[serde(default)]
+    pub name: Option<String>,
     /// Тип модели (`model_type` в ответе CI).
+    #[serde(alias = "type")]
     pub model_type: ModelType,
     /// Название провайдера, например `Google`.
-    #[serde(default)]
+    #[serde(default, alias = "provider")]
     pub provider_name: Option<String>,
     /// URL логотипа провайдера; CI может прислать `null`.
     #[serde(default)]
@@ -113,6 +149,12 @@ pub struct CatalogModel {
     /// значения — строки с 6 знаками после запятой.
     #[serde(default)]
     pub media_prices: MediaPrices,
+    /// Базовая ставка, когда для выбранных параметров нет отдельной градации.
+    #[serde(default)]
+    pub media_unit_price: Option<String>,
+    /// У речевых моделей таблица media_prices часто пуста; тариф находится в tiers.
+    #[serde(default)]
+    pub pricing_scopes: Option<Vec<CatalogPricingScope>>,
     /// Скидка в процентах строкой, например `35.00`.
     #[serde(default)]
     pub discount_percent: Option<String>,
@@ -125,6 +167,89 @@ pub struct CatalogModel {
 }
 
 impl CatalogModel {
+    pub fn matches_kind(&self, kind: MediaKind) -> bool {
+        matches!(
+            (kind, &self.model_type),
+            (MediaKind::Image, ModelType::Image)
+                | (MediaKind::Video, ModelType::Video)
+                | (MediaKind::Audio, ModelType::Speech)
+        )
+    }
+
+    /// Единый фильтр каталога для WASM-интерфейса и нативного ядра.
+    pub fn supports_mode(&self, mode: GenMode) -> bool {
+        match mode {
+            GenMode::TextToImage => {
+                self.model_type == ModelType::Image && self.supports("/v1/images/generations")
+            }
+            GenMode::ImageEdit => {
+                self.model_type == ModelType::Image
+                    && self.supports_image_edit
+                    && self.supports("/v1/images/edits")
+            }
+            GenMode::TextToVideo | GenMode::ImageToVideo | GenMode::ReferenceToVideo => {
+                self.model_type == ModelType::Video
+                    && self.supports("/v1/videos/generations")
+                    && self.supports_video_input(mode)
+            }
+            GenMode::Speech | GenMode::Music | GenMode::SoundEffects => {
+                let audio_mode = if self.id.contains("sound-effects") {
+                    GenMode::SoundEffects
+                } else if self.id.contains("music") {
+                    GenMode::Music
+                } else {
+                    GenMode::Speech
+                };
+                self.model_type == ModelType::Speech
+                    && self.supports("/v1/audio/speech")
+                    && mode == audio_mode
+            }
+        }
+    }
+
+    fn supports_video_input(&self, mode: GenMode) -> bool {
+        // Эти маршруты требуют исходный видеоклип, который студия не отправляет.
+        if self.id.contains("-motion-control")
+            || self.id == "proteus"
+            || self.id.starts_with("starlight-precise-")
+        {
+            return false;
+        }
+        // CI публикует варианты одной модели как отдельные id. Даже t2v-вариант
+        // может иметь общий для семейства флаг image-input.
+        for part in self.id.split('-') {
+            match part {
+                "t2v" => return mode == GenMode::TextToVideo,
+                "i2v" => return mode == GenMode::ImageToVideo,
+                "r2v" => return mode == GenMode::ReferenceToVideo,
+                _ => {}
+            }
+        }
+        let image_input = self.has_feature("image-input");
+        match mode {
+            GenMode::TextToVideo => true,
+            GenMode::ImageToVideo => image_input,
+            // image_url (первый кадр) и input_references — разные параметры.
+            // Для моделей без маркировки r2v учитываем опубликованные тарифы
+            // режима и варианты с подтверждённым приёмом референсов.
+            GenMode::ReferenceToVideo => {
+                self.media_prices.keys().any(|key| {
+                    key.split('+')
+                        .any(|part| part.eq_ignore_ascii_case("reference_to_video"))
+                }) || (image_input
+                    && matches!(
+                        self.id.as_str(),
+                        "veo-3.1-generate-001"
+                            | "veo-3.1-fast-generate-001"
+                            | "grok-imagine-video"
+                            | "grok-imagine-video-1.5"
+                            | "seedance-2.0"
+                    ))
+            }
+            _ => false,
+        }
+    }
+
     /// Поддерживает ли модель эндпоинт (точное совпадение, например `/v1/audio/speech`).
     pub fn supports(&self, endpoint: &str) -> bool {
         self.supported_endpoints.iter().any(|e| e == endpoint)
