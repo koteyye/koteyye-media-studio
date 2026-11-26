@@ -12,24 +12,17 @@ pub(crate) fn entry(key: &str) -> Option<(&'static str, &'static str)> {
         "gen.open_image" => ("Открыть кадр", "View image"),
         "gen.one" => ("Кадры по одному", "One image at a time"),
         "gen.grid" => ("Варианты рядом", "Side by side"),
+        "gen.view_mode" => ("Вид результатов", "Result layout"),
+        "gen.request_id" => ("Идентификатор запроса", "Request ID"),
         "gen.use" => ("Как референс", "Use as reference"),
         "gen.prev" => ("Предыдущий кадр", "Previous image"),
         "gen.next" => ("Следующий кадр", "Next image"),
         "gen.repeat" => ("Вернуть запрос", "Restore request"),
         "gen.play" => ("Воспроизвести", "Play"),
         "gen.select" => ("Выбрать результат", "Select result"),
-        "gen.or_title" => (
-            "Генерация через OpenRouter будет подключена позже.",
-            "OpenRouter generation is planned for a future version.",
-        ),
-        "gen.or_note" => (
-            "Для генерации сейчас выберите Cheaper Inference в настройках.",
-            "To generate now, select Cheaper Inference in settings.",
-        ),
         "gen.wait" => ("Запрос выполняется", "Request in progress"),
         "gen.pending" => ("Ожидает получения результата", "Awaiting result"),
         "gen.open_settings" => ("Настройки провайдера", "Provider settings"),
-        "gen.select_ci" => ("Использовать Cheaper Inference", "Use Cheaper Inference"),
         "gen.refs" => ("Референсы", "References"),
         "gen.view_ref" => ("Посмотреть референс", "View reference"),
         "gen.add_first_frame" => ("Добавить первый кадр", "Add first frame"),
@@ -49,6 +42,14 @@ pub(crate) fn entry(key: &str) -> Option<(&'static str, &'static str)> {
         "gen.failure.server" => (
             "Сервис вернул серверную ошибку при обработке этого запроса.",
             "The service returned a server error while processing this request.",
+        ),
+        "gen.failure.client_timeout" => (
+            "Студия не дождалась ответа. Статус запроса можно посмотреть в кабинете провайдера.",
+            "The studio stopped waiting for a response. Check the request status in the provider dashboard.",
+        ),
+        "gen.failure.server_timeout" => (
+            "Сервис завершил запрос по таймауту.",
+            "The service timed out while processing this request.",
         ),
         "gen.failure.access" => (
             "Сервис отклонил доступ к этому запросу.",

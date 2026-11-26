@@ -23,6 +23,7 @@ mod error;
 mod files;
 mod images;
 mod jobs;
+mod openrouter;
 mod storage;
 mod video;
 
@@ -31,5 +32,6 @@ pub use client::{CiClient, OpenRouterKeyClient};
 pub use error::CoreError;
 pub use files::{ensure_folder, ext_for, save_media};
 pub use images::image_bytes;
-pub use jobs::Jobs;
+pub use jobs::{Jobs, StartedGeneration};
+pub use openrouter::video::OpenRouterVideoJob;
 pub use storage::Storage;

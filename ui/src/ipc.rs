@@ -17,8 +17,8 @@
 use std::rc::Rc;
 
 use km_shared::{
-    AppEvent, BalanceView, CatalogModel, GenerationRequest, HistoryFilter, HistoryRecord,
-    MediaKind, Provider, Settings, UpdateStatus,
+    AppEvent, BalanceView, CatalogModel, GenMode, GenerationRequest, HistoryFilter, HistoryRecord,
+    McpStatus, MediaKind, Provider, Settings, UpdateStatus,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -33,7 +33,7 @@ mod glue {
 export async function invoke(cmd, argsJson) {
     const internals = window.__TAURI_INTERNALS__;
     if (!internals) {
-        throw new Error("Tauri IPC недоступен: страница открыта не в окне Tauri");
+        throw new Error("IPC is unavailable");
     }
     const result = await internals.invoke(cmd, JSON.parse(argsJson));
     return JSON.stringify(result);
@@ -84,9 +84,8 @@ async fn invoke_command<T: DeserializeOwned>(cmd: &str, args: Value) -> Result<T
         .map_err(js_error_to_string)?;
     let json = result
         .as_string()
-        .ok_or_else(|| format!("команда {cmd} вернула не JSON-строку"))?;
-    serde_json::from_str(&json)
-        .map_err(|e| format!("не удалось разобрать ответ команды {cmd}: {e}"))
+        .ok_or_else(|| format!("Invalid IPC response for command {cmd}"))?;
+    serde_json::from_str(&json).map_err(|e| format!("Invalid IPC response for command {cmd}: {e}"))
 }
 
 /// Приводит ошибку JS (reject promise) к строке для UI.
@@ -108,14 +107,9 @@ fn settings_args(settings: &Settings) -> Value {
     json!({ "settings": settings })
 }
 
-/// Аргументы `set_api_key`: ключ под ключом `key`.
-fn api_key_args(key: &str) -> Value {
-    json!({ "key": key })
-}
-
 /// Аргументы `fetch_models`: вид медиа под ключом `kind` (lowercase).
-fn models_args(kind: MediaKind) -> Value {
-    json!({ "kind": kind })
+fn models_args(provider: Provider, kind: MediaKind) -> Value {
+    json!({ "provider": provider, "kind": kind })
 }
 
 /// Аргументы `generate`: запрос под ключом `req`.
@@ -149,6 +143,9 @@ pub async fn get_settings() -> Result<Settings, String> {
     invoke_command("get_settings", json!({})).await
 }
 
+pub async fn system_language() -> Result<Option<km_shared::Lang>, String> {
+    invoke_command("system_language", json!({})).await
+}
 /// Сохраняет настройки в SQLite (ключ API здесь не хранится).
 ///
 /// # Errors
@@ -158,17 +155,36 @@ pub async fn set_settings(s: &Settings) -> Result<(), String> {
     invoke_command("set_settings", settings_args(s)).await
 }
 
-/// Сохраняет API-ключ в системный keychain; пустой ключ удаляет сохранённый.
-///
-/// # Errors
-///
-/// Строка с причиной, если keychain не принял ключ.
-pub async fn set_api_key(key: &str) -> Result<(), String> {
-    invoke_command("set_api_key", api_key_args(key)).await
+pub async fn mcp_status() -> Result<McpStatus, String> {
+    invoke_command("mcp_status", json!({})).await
+}
+
+pub async fn mcp_set_enabled(enabled: bool) -> Result<McpStatus, String> {
+    invoke_command("mcp_set_enabled", json!({ "enabled": enabled })).await
+}
+
+pub async fn mcp_rotate_token() -> Result<McpStatus, String> {
+    invoke_command("mcp_rotate_token", json!({})).await
+}
+
+pub async fn mcp_set_model_default(
+    provider: Provider,
+    mode: GenMode,
+    model: Option<&str>,
+) -> Result<McpStatus, String> {
+    invoke_command(
+        "mcp_set_model_default",
+        json!({ "provider": provider, "mode": mode, "model": model }),
+    )
+    .await
 }
 
 pub async fn provider_has_key(provider: Provider) -> Result<bool, String> {
     invoke_command("provider_has_key", json!({ "provider": provider })).await
+}
+
+pub async fn open_provider_api_keys(provider: Provider) -> Result<(), String> {
+    invoke_command("open_provider_api_keys", json!({ "provider": provider })).await
 }
 
 pub async fn set_provider_key(provider: Provider, key: &str) -> Result<(), String> {
@@ -191,25 +207,16 @@ pub async fn result_reference(id: &str, index: usize) -> Result<String, String> 
     invoke_command("result_reference", json!({ "id": id, "index": index })).await
 }
 
-/// Проверка подключения к Cheaper Inference.
-///
-/// `true` — ключ принят, `false` — ключа нет или CI ответил 401.
-///
-/// # Errors
-///
-/// Строка с причиной при ошибках, отличных от 401 (сеть, 5xx), и при сбое
-/// чтения keychain: подключение не проверено, редиректа в онбординг нет.
-pub async fn test_connection(key: Option<&str>) -> Result<bool, String> {
-    invoke_command("test_connection", json!({ "key": key })).await
-}
-
 /// Каталог моделей по виду медиа; без ключа — публичный каталог.
 ///
 /// # Errors
 ///
 /// Строка с причиной при сбое запроса или разбора ответа.
-pub async fn fetch_models(kind: MediaKind) -> Result<Vec<CatalogModel>, String> {
-    invoke_command("fetch_models", models_args(kind)).await
+pub async fn fetch_models(
+    provider: Provider,
+    kind: MediaKind,
+) -> Result<Vec<CatalogModel>, String> {
+    invoke_command("fetch_models", models_args(provider, kind)).await
 }
 
 /// Проверяет версию подписанного обновления без скачивания установщика.
@@ -282,8 +289,8 @@ pub async fn fetch_balance(provider: Provider) -> Result<BalanceView, String> {
 /// # Errors
 ///
 /// Строка с причиной, если диалог не завершился.
-pub async fn pick_folder() -> Result<Option<String>, String> {
-    invoke_command("pick_folder", json!({})).await
+pub async fn pick_folder(title: &str) -> Result<Option<String>, String> {
+    invoke_command("pick_folder", json!({ "title": title })).await
 }
 
 /// Открывает файл в приложении ОС; путь только внутри папки сохранения.
@@ -344,12 +351,12 @@ pub fn on_event<F: Fn(AppEvent) + 'static>(cb: F) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use km_shared::{GenMode, Lang, Theme};
+    use km_shared::{GenMode, LangPreference, Theme};
 
     fn settings() -> Settings {
         Settings {
             local_folder: "/media".to_owned(),
-            lang: Lang::Ru,
+            lang: LangPreference::Ru,
             theme: Theme::Dark,
             show_real_balance: true,
             ..Settings::default()
@@ -357,10 +364,15 @@ mod tests {
     }
 
     #[test]
-    fn models_args_serializes_kind_lowercase() {
-        assert_eq!(models_args(MediaKind::Image), json!({"kind": "image"}));
-        assert_eq!(models_args(MediaKind::Video), json!({"kind": "video"}));
-        assert_eq!(models_args(MediaKind::Audio), json!({"kind": "audio"}));
+    fn models_args_serializes_kind_and_provider() {
+        assert_eq!(
+            models_args(Provider::CheaperInference, MediaKind::Image),
+            json!({"provider": "ci", "kind": "image"})
+        );
+        assert_eq!(
+            models_args(Provider::OpenRouter, MediaKind::Video),
+            json!({"provider": "openrouter", "kind": "video"})
+        );
     }
 
     #[test]
@@ -408,7 +420,6 @@ mod tests {
 
     #[test]
     fn scalar_args_use_command_keys() {
-        assert_eq!(api_key_args("sk-123"), json!({"key": "sk-123"}));
         assert_eq!(id_args("abc"), json!({"id": "abc"}));
         assert_eq!(path_args("/media/a.png"), json!({"path": "/media/a.png"}));
     }

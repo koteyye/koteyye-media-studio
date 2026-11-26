@@ -16,14 +16,15 @@
 //! поэтому баннер ошибки IPC показывается здесь самостоятельно.
 
 use dioxus::prelude::*;
-use km_shared::Settings as AppSettings;
+use km_shared::{Provider, Settings as AppSettings};
 
+use crate::components::error_notice::ErrorNotice;
 #[cfg(test)]
 use crate::components::key_status::key_status;
 use crate::components::key_status::{KeyStatus, KeyStatusView, check_connection, save_key};
 use crate::ipc;
 use crate::router::Route;
-use crate::state::{AppState, lang_name, parse_lang, use_t};
+use crate::state::{AppState, parse_lang_preference, use_t};
 
 /// Шаг онбординга; порядок фиксирован (приветствие → ключ → папка → готово).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,7 +104,12 @@ pub fn Onboarding() -> Element {
     let welcome = use_t("onboarding.welcome");
     let intro = use_t("onboarding.intro");
     let step_key = use_t("onboarding.step_key");
-    let key_hint = use_t("onboarding.key_hint");
+    let provider_label = use_t("ws.provider");
+    let provider = state.settings.read().provider;
+    let key_hint = use_t(match provider {
+        Provider::CheaperInference => "onboarding.key_hint",
+        Provider::OpenRouter => "onboarding.openrouter_key_hint",
+    });
     let step_folder = use_t("onboarding.step_folder");
     let folder_hint = use_t("onboarding.folder_hint");
     let done_label = use_t("onboarding.done");
@@ -115,6 +121,7 @@ pub fn Onboarding() -> Element {
     let skip_key_warning = use_t("onboarding.skip_key_warning");
     let skip_folder_warning = use_t("onboarding.skip_folder_warning");
     let language_label = use_t("settings.language");
+    let system_language_label = use_t("settings.language_system");
     let key_label = use_t("settings.api_key");
     let folder_label = use_t("settings.folder");
     let pick_label = use_t("settings.pick_folder");
@@ -124,7 +131,6 @@ pub fn Onboarding() -> Element {
     let ok_label = use_t("settings.connection_ok");
     let rejected_label = use_t("settings.connection_rejected");
     let unverified_label = use_t("settings.connection_unverified");
-    let error_label = use_t("common.error");
     let close_label = use_t("common.close");
 
     // Локальное состояние шагов (живёт в scope экрана; маршрут не меняется).
@@ -134,6 +140,7 @@ pub fn Onboarding() -> Element {
     let mut step = use_signal(|| Step::Welcome);
     let mut key_input = use_signal(String::new);
     let key_busy = use_signal(|| false);
+    let mut switching_provider = use_signal(|| false);
     let mut status = use_signal(|| KeyStatus::Idle);
     let mut key_skipped = use_signal(|| false);
     let mut folder = use_signal(move || initial_folder);
@@ -141,7 +148,7 @@ pub fn Onboarding() -> Element {
     let finishing = use_signal(|| false);
 
     let current_step = (step)();
-    let lang = (state.lang)();
+    let lang = state.settings.read().lang;
     let error = (state.error)().or_else(|| (state.background_error)());
     let key_busy_value = (key_busy)();
     let folder_busy_value = (folder_busy)();
@@ -182,7 +189,10 @@ pub fn Onboarding() -> Element {
                 p { class: "status status-ok", {key_label} ": ✓ " {ok_label} }
             },
             KeyStatus::Unverified(e) => rsx! {
-                p { class: "status status-error", {key_label} ": " {unverified_label} ": " {e.as_str()} }
+                div { class: "status status-error",
+                    p { {key_label} ": " {unverified_label} }
+                    ErrorNotice { message: e.clone() }
+                }
             },
             // Защита от непредусмотренного статуса: дальше с шага ключа без
             // сохранённого ключа не уйти (key_step_can_proceed), кроме пропуска.
@@ -204,16 +214,17 @@ pub fn Onboarding() -> Element {
             h1 { {welcome} }
             p { class: "onboarding-intro", {intro} }
             div { class: "settings-section",
-                span { class: "section-title", {language_label} }
+                label { class: "section-title", r#for: "onboarding-language", {language_label} }
                 select {
+                    id: "onboarding-language",
                     class: "settings-select",
-                    value: lang_name(lang),
+                    value: lang.code(),
                     onchange: move |evt| {
-                        let next_lang = parse_lang(&evt.value());
+                        let next_lang = parse_lang_preference(&evt.value());
                         spawn(async move {
                             // База читается в задаче: видит последние оптимистичные
                             // изменения и не затирает их при быстрых правках.
-                            if next_lang == (state.lang)() {
+                            if next_lang == state.settings.peek().lang {
                                 return;
                             }
                             let next = AppSettings { lang: next_lang, ..(state.settings)() };
@@ -221,8 +232,38 @@ pub fn Onboarding() -> Element {
                         });
                     },
                     // Названия языков — эндонимы, не переводятся.
-                    option { value: "ru", "Русский" }
-                    option { value: "en", "English" }
+                    option { value: "system", selected: lang.code() == "system", {system_language_label} }
+                    option { value: "ru", selected: lang.code() == "ru", "Русский" }
+                    option { value: "en", selected: lang.code() == "en", "English" }
+                }
+            }
+            div { class: "settings-section",
+                label { class: "section-title", r#for: "onboarding-provider", {provider_label} }
+                select {
+                    id: "onboarding-provider",
+                    class: "settings-select",
+                    disabled: switching_provider(),
+                    value: provider.name(),
+                    onchange: move |evt| {
+                        let next = match evt.value().as_str() {
+                            "OpenRouter" => Provider::OpenRouter,
+                            _ => Provider::CheaperInference,
+                        };
+                        if next == provider || *switching_provider.peek() { return; }
+                        switching_provider.set(true);
+                        spawn(async move {
+                            let settings = AppSettings { provider: next, ..(state.settings)() };
+                            if state.persist_settings(settings).await.is_ok() {
+                                key_input.set(String::new());
+                                status.set(KeyStatus::Idle);
+                                key_skipped.set(false);
+                            }
+                            switching_provider.set(false);
+                        });
+                    },
+                    for service in [Provider::CheaperInference, Provider::OpenRouter] {
+                        option { value: service.name(), selected: service == provider, {service.name()} }
+                    }
                 }
             }
         },
@@ -257,7 +298,7 @@ pub fn Onboarding() -> Element {
                     disabled: key_busy_value,
                     onclick: move |_| {
                         let candidate = key_input.peek().clone();
-                            spawn(async move { check_connection(Some(candidate), key_busy, status).await });
+                        spawn(async move { check_connection(provider, Some(candidate), key_busy, status).await });
                     },
                     {check_label}
                 }
@@ -283,7 +324,7 @@ pub fn Onboarding() -> Element {
                     onclick: move |_| {
                         spawn(async move {
                             folder_busy.set(true);
-                            match ipc::pick_folder().await {
+                            match ipc::pick_folder(pick_label).await {
                                 Ok(Some(path)) => folder.set(path),
                                 // Отмена диалога — выбор не меняем.
                                 Ok(None) => {}
@@ -313,6 +354,7 @@ pub fn Onboarding() -> Element {
         Step::Welcome => rsx! {
             button {
                 class: "btn btn-primary",
+                disabled: switching_provider(),
                 onclick: move |_| {
                     if let Some(next) = (step)().next() {
                         step.set(next);
@@ -324,6 +366,7 @@ pub fn Onboarding() -> Element {
         Step::Key => rsx! {
             button {
                 class: "btn",
+                disabled: key_busy_value,
                 onclick: move |_| {
                     if let Some(prev) = (step)().prev() {
                         step.set(prev);
@@ -408,7 +451,7 @@ pub fn Onboarding() -> Element {
                 // Экран вне Layout: баннер ошибки IPC показываем здесь.
                 if let Some(message) = error {
                     div { class: "error-banner",
-                        span { class: "error-banner-text", {error_label} ": {message}" }
+                        ErrorNotice { message }
                         button {
                             class: "banner-dismiss",
                             title: close_label,

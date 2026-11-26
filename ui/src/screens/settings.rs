@@ -10,23 +10,41 @@ use crate::{router::Route, state::AppState};
 mod application;
 mod connection;
 mod interface;
+mod mcp;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
     Connection,
     Interface,
+    Mcp,
 }
 impl Tab {
+    const ALL: [Self; 3] = [Self::Connection, Self::Interface, Self::Mcp];
+
     fn id(self) -> &'static str {
         match self {
             Self::Connection => "connection",
             Self::Interface => "interface",
+            Self::Mcp => "mcp",
         }
     }
     fn label(self) -> &'static str {
         match self {
             Self::Connection => "ws.connection",
             Self::Interface => "ws.interface",
+            Self::Mcp => "ws.mcp",
+        }
+    }
+
+    fn keyboard_target(self, key: Key) -> Option<Self> {
+        let len = Self::ALL.len();
+        let index = self as usize;
+        match key {
+            Key::ArrowRight => Some(Self::ALL[(index + 1) % len]),
+            Key::ArrowLeft => Some(Self::ALL[(index + len - 1) % len]),
+            Key::Home => Self::ALL.first().copied(),
+            Key::End => Self::ALL.last().copied(),
+            _ => None,
         }
     }
 }
@@ -96,7 +114,7 @@ pub fn Settings() -> Element {
                 class: "sw-tabs",
                 role: "tablist",
                 aria_label: tr(lang, "settings.title"),
-                for next in [Tab::Connection, Tab::Interface] {
+                for next in Tab::ALL {
                     button {
                         key: "{next.id()}",
                         r#type: "button",
@@ -108,14 +126,7 @@ pub fn Settings() -> Element {
                         tabindex: if selected == next { "0" } else { "-1" },
                         onclick: move |_| tab.set(next),
                         onkeydown: move |e| {
-                            let target = match e.key() {
-                                Key::ArrowRight | Key::ArrowLeft => {
-                                    if next == Tab::Connection { Tab::Interface } else { Tab::Connection }
-                                }
-                                Key::Home => Tab::Connection,
-                                Key::End => Tab::Interface,
-                                _ => return,
-                            };
+                            let Some(target) = next.keyboard_target(e.key()) else { return; };
                             e.prevent_default();
                             tab.set(target);
                             if let Some(el) = web_sys::window()
@@ -150,6 +161,15 @@ pub fn Settings() -> Element {
                     interface::Interface {
 
                     }
+                }
+            }
+            div {
+                id: "sw-pane-mcp",
+                role: "tabpanel",
+                aria_labelledby: "sw-tab-mcp",
+                hidden: selected != Tab::Mcp,
+                if selected == Tab::Mcp {
+                    mcp::Mcp {}
                 }
             }
         }

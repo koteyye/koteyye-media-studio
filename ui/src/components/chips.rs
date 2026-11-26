@@ -8,6 +8,10 @@ use km_shared::{CatalogModel, GenMode, GenParams};
 
 use crate::state::use_t;
 
+#[path = "openrouter_chips.rs"]
+mod openrouter;
+pub(crate) use openrouter::OpenRouterChips;
+
 #[derive(Clone, Copy)]
 enum Field {
     Size,
@@ -21,6 +25,10 @@ enum Field {
     Voice,
     Format,
     Speed,
+    Seed,
+    ExactSize,
+    AspectRatio,
+    ResolutionTier,
 }
 
 fn dimensions(size: &str) -> Option<(u32, u32)> {
@@ -72,12 +80,53 @@ impl Field {
             Self::Voice => params.voice = value,
             Self::Format => params.response_format = value,
             Self::Speed => params.speed = value.and_then(|v| v.parse().ok()),
+            Self::Seed => params.seed = value.and_then(|v| v.parse().ok()),
+            Self::ExactSize => {
+                if value.is_some() {
+                    params.aspect_ratio = None;
+                    params.resolution = None;
+                }
+                params.size = value;
+            }
+            Self::AspectRatio => {
+                if value.is_some() {
+                    params.size = None;
+                }
+                params.aspect_ratio = value;
+            }
+            Self::ResolutionTier => {
+                if value.is_some() {
+                    params.size = None;
+                }
+                params.resolution = value;
+            }
         }
     }
 }
 
 fn choices(values: &[&str]) -> Vec<(String, String)> {
     values.iter().map(|&v| (v.into(), v.into())).collect()
+}
+
+fn quality_options<'a>(
+    lang: km_shared::Lang,
+    values: impl IntoIterator<Item = &'a str>,
+) -> Vec<(String, String)> {
+    values
+        .into_iter()
+        .map(|value| {
+            let key = match value {
+                "auto" => "controls.auto",
+                "low" => "controls.quality_low",
+                "medium" => "controls.quality_medium",
+                "high" => "controls.quality_high",
+                "xhigh" => "controls.quality_xhigh",
+                "max" => "controls.quality_max",
+                _ => return (value.into(), value.into()),
+            };
+            (value.into(), km_ui_core::i18n::tr(lang, key).into())
+        })
+        .collect()
 }
 
 fn image_sizes(model: Option<&CatalogModel>, mode: GenMode) -> Vec<(String, String)> {
@@ -183,6 +232,7 @@ pub fn ParamChips(
     on_change: Callback<GenParams>,
     model: Option<CatalogModel>,
 ) -> Element {
+    let lang = (use_context::<crate::state::AppState>().lang)();
     let size = use_t("studio.size");
     let ratio = use_t("studio.ratio");
     let duration = use_t("studio.duration");
@@ -247,7 +297,7 @@ pub fn ParamChips(
                             label: size, value: params.size.clone(), options: image_sizes(model.as_ref(), mode),
                             onchange: move |v| edit.call((Field::Size,v)),
                         }
-                        SelectChip { label: quality, value: params.quality.clone(), options: choices(&["low","medium","high"]),
+                        SelectChip { label: quality, value: params.quality.clone(), options: quality_options(lang, ["low","medium","high"]),
                             onchange: move |v| edit.call((Field::Quality, v)),
                         }
                     }

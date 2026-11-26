@@ -100,6 +100,7 @@ jobs:
           $setup = Start-Process -FilePath $installers[0].FullName -ArgumentList @('/S', "/D=$installed") -Wait -PassThru -WindowStyle Hidden
           if ($setup.ExitCode -ne 0) { throw "NSIS вернул $($setup.ExitCode)" }
           Assert-StudioSignature (Join-Path $installed 'koteyye-media-studio.exe')
+          Assert-StudioSignature (Join-Path $installed 'koteyye-media-studio-cli.exe')
 
       - name: Убрать импортированный сертификат из хранилища раннера
         if: always() && runner.os == 'Windows' && env.WINDOWS_CERTIFICATE_THUMBPRINT != ''
@@ -125,7 +126,13 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           python3 .github/scripts/release.py configure
-          cargo tauri build --ci --target universal-apple-darwin --bundles app,dmg --config "$RUNNER_TEMP/studio-release.json" -- --locked
+          release_config="$RUNNER_TEMP/studio-release.json"
+          cargo tauri build --ci --target universal-apple-darwin --no-bundle --config "$release_config" -- --locked
+          # Tauri 2.12 merges only the main executable in a universal build.
+          cli=koteyye-media-studio-cli
+          lipo -create "target/aarch64-apple-darwin/release/$cli" "target/x86_64-apple-darwin/release/$cli" \
+            -output "target/universal-apple-darwin/release/$cli"
+          cargo tauri bundle --ci --target universal-apple-darwin --bundles app,dmg --config "$release_config"
           bundle=target/universal-apple-darwin/release/bundle
           archives=("$bundle"/macos/*.app.tar.gz)
           disks=("$bundle"/dmg/*.dmg)
@@ -139,6 +146,7 @@ jobs:
           dmg=${disks[0]}
           binary=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
           lipo "$app/Contents/MacOS/$binary" -verify_arch arm64 x86_64
+          lipo "$app/Contents/MacOS/$cli" -verify_arch arm64 x86_64
           codesign --verify --deep --strict "$app"
           codesign -dv --verbose=4 "$app" 2>&1 | grep -Fx "Authority=$APPLE_SIGNING_IDENTITY"
           codesign -dv --verbose=4 "$app" 2>&1 | grep -Fx "TeamIdentifier=$APPLE_TEAM_ID"

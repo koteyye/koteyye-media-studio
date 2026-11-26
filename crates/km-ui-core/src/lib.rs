@@ -5,6 +5,7 @@
 //! UI-компоненты (Dioxus) и оболочка Tauri используют эти функции,
 //! не дублируя словари, цвета и форматы.
 
+mod error_i18n;
 pub mod format;
 mod generator_i18n;
 pub mod i18n;

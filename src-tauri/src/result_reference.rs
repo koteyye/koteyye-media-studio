@@ -52,7 +52,7 @@ mod tests {
     #[test]
     fn only_completed_indexed_images_can_be_attachments() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("image.png");
+        let path = dunce::canonicalize(dir.path()).unwrap().join("image.png");
         let encoded = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
         std::fs::write(&path, STANDARD.decode(encoded).unwrap()).unwrap();
         let storage = Storage::open_in_memory().unwrap();
@@ -78,6 +78,13 @@ mod tests {
             format!("data:image/png;base64,{encoded}")
         );
         assert!(read_reference(&storage, "ok", 1).is_err());
+        row.id = "router".into();
+        row.provider = Provider::OpenRouter;
+        storage.insert_history(&row).unwrap();
+        assert_eq!(
+            read_reference(&storage, "router", 0).unwrap(),
+            format!("data:image/png;base64,{encoded}")
+        );
         assert!(read_reference(&storage, path.to_str().unwrap(), 0).is_err());
         row.id = "video".into();
         row.kind = MediaKind::Video;

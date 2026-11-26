@@ -40,6 +40,16 @@ pub enum GenMode {
     SoundEffects,
 }
 
+impl GenMode {
+    pub const fn kind(self) -> MediaKind {
+        match self {
+            Self::TextToImage | Self::ImageEdit => MediaKind::Image,
+            Self::TextToVideo | Self::ImageToVideo | Self::ReferenceToVideo => MediaKind::Video,
+            Self::Speech | Self::Music | Self::SoundEffects => MediaKind::Audio,
+        }
+    }
+}
+
 /// Параметры генерации: набор зависит от режима, лишние CI игнорирует.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]

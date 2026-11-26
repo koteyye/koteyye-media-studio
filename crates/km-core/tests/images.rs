@@ -4,6 +4,7 @@
 //! на мок-сервере не должно остаться ни одного принятого запроса.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use km_core::{CiClient, CoreError, image_bytes};
@@ -376,6 +377,59 @@ async fn edits_count_multipart_framing_mixed_urls_and_decoded_limit_before_post(
         matches!(client.edit_image(&req).await, Err(CoreError::Validation(e)) if e.contains("20"))
     );
     assert!(received(&server).await.is_empty());
+}
+
+#[tokio::test]
+async fn explicit_timeout_applies_to_image_generation_and_multipart_edit() {
+    let server = MockServer::start().await;
+    let slow = ResponseTemplate::new(200)
+        .set_body_json(two_images_response())
+        .set_delay(Duration::from_secs(1));
+    Mock::given(method("POST"))
+        .and(path("/v1/images/generations"))
+        .respond_with(slow.clone())
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/images/edits"))
+        .respond_with(slow)
+        .mount(&server)
+        .await;
+    let client = client_for(&server).with_timeout(Duration::from_millis(100));
+
+    assert!(matches!(
+        client.generate_image(&image_request()).await,
+        Err(CoreError::Timeout)
+    ));
+    assert!(matches!(
+        client.edit_image(&edit_request()).await,
+        Err(CoreError::Timeout)
+    ));
+}
+
+#[tokio::test]
+async fn gateway_timeout_on_image_generation_keeps_the_support_request_id() {
+    const ID: &str = "739ac917-97b1-4b66-9269-db0f4ef130ea";
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/images/generations"))
+        .respond_with(
+            ResponseTemplate::new(504)
+                .insert_header("x-ci-request-id", ID)
+                .set_body_json(json!({
+                    "error": {"code": "gateway_timeout", "message": "Provider timed out"}
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let error = client_for(&server)
+        .generate_image(&image_request())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, CoreError::Http { status: 504, .. }));
+    assert!(error.to_string().ends_with(&format!("[request_id: {ID}]")));
 }
 
 #[tokio::test]

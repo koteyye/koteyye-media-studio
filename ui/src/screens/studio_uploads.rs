@@ -1,156 +1,215 @@
-//! Входные изображения Студии: первый кадр, референсы редактирования и PNG-маска.
+//! Вложения изображений и видео в единой форме студии.
 
 use dioxus::prelude::*;
 use km_shared::MAX_REQUEST_WIRE_BYTES;
 use km_shared::image::inline_bytes;
-use km_shared::{GenMode, MediaKind, Provider, Reference};
-use km_ui_core::i18n::tr;
-use km_ui_core::studio::UploadKind;
+use km_shared::video::VideoLimits;
+use km_shared::{CatalogModel, GenMode, MediaKind, Provider, Reference};
+use km_ui_core::studio::{MAX_OPENROUTER_EDIT_SOURCES, UploadKind, mode_for_input};
 
 use crate::components::upload::{FilePicker, attach_edit_batch};
 use crate::state::{AppState, StudioDraft, use_t};
 
-pub(super) fn file_mode(mode: GenMode) -> Option<(GenMode, UploadKind)> {
-    match mode {
-        GenMode::TextToImage | GenMode::ImageEdit => {
-            Some((GenMode::ImageEdit, UploadKind::EditSource))
+pub(super) fn file_mode(
+    provider: Provider,
+    kind: MediaKind,
+    model: Option<&CatalogModel>,
+) -> Option<UploadKind> {
+    let model = model.filter(|model| model.matches_kind(kind))?;
+    match kind {
+        MediaKind::Image if model.supports_mode(GenMode::ImageEdit) => Some(match provider {
+            Provider::CheaperInference => UploadKind::EditSource,
+            Provider::OpenRouter => UploadKind::OpenRouterEditSource,
+        }),
+        MediaKind::Video
+            if model.supports_mode(GenMode::ImageToVideo)
+                || model.supports_mode(GenMode::ReferenceToVideo) =>
+        {
+            Some(UploadKind::Image)
         }
-        GenMode::TextToVideo | GenMode::ImageToVideo => {
-            Some((GenMode::ImageToVideo, UploadKind::Image))
-        }
-        GenMode::ReferenceToVideo => Some((mode, UploadKind::Image)),
         _ => None,
     }
 }
 
-/// Вызывается только после проверки всего набора. Возвращает файл для подтверждения,
-/// если в отдельном черновике видео уже указан другой первый кадр.
-pub(super) fn accept_files(
-    state: AppState,
-    kind: MediaKind,
-    source: StudioDraft,
-    urls: Vec<String>,
-    replace: bool,
-) -> Result<Option<String>, &'static str> {
-    let mut section = state.studio(kind);
-    if state.settings.peek().provider != Provider::CheaperInference
-        || section.active.peek().mode != source.mode
-    {
-        return Ok(None);
+pub(super) fn allows_multiple(kind: MediaKind, model: &CatalogModel) -> bool {
+    match kind {
+        MediaKind::Image => true,
+        MediaKind::Video => model.supports_mode(GenMode::ReferenceToVideo),
+        MediaKind::Audio => false,
     }
-    let (target_mode, _) = file_mode(source.mode).ok_or("controls.upload_type")?;
-    if target_mode == source.mode {
-        add_sources(source, urls)?;
-        return Ok(None);
-    }
-    let mut target = section
-        .drafts
-        .read()
-        .iter()
-        .find(|d| d.mode == target_mode)
-        .copied()
-        .ok_or("controls.upload_type")?;
-    if target_mode == GenMode::ImageToVideo && !replace {
-        let refs = target.references.peek();
-        if let Some(stored) = refs.first()
-            && urls.first() != Some(&stored.data_url)
-        {
-            return Ok(urls.into_iter().next());
-        }
-    }
-    add_sources(target, urls)?;
-    if target.prompt.peek().trim().is_empty() {
-        let text = source.prompt.peek().clone();
-        if !text.is_empty() {
-            target.prompt.set(text);
-        }
-    }
-    section.active.set(target);
-    Ok(None)
 }
 
-fn add_sources(mut draft: StudioDraft, urls: Vec<String>) -> Result<(), &'static str> {
-    if draft.mode == GenMode::ImageEdit {
-        return attach_edit_batch(&mut draft, urls);
+pub(crate) fn accept_files(
+    mut draft: StudioDraft,
+    kind: MediaKind,
+    model: &CatalogModel,
+    urls: Vec<String>,
+) -> Result<(), &'static str> {
+    if urls.is_empty() || *draft.model.peek() != model.id {
+        return Ok(());
     }
-    let added = urls.into_iter().map(|data_url| Reference { data_url });
-    if draft.mode == GenMode::ImageToVideo {
-        draft.references.set(added.collect());
+    file_mode(draft.provider, kind, Some(model)).ok_or("controls.model_no_references")?;
+    let previous_mode = draft.mode_for(kind, Some(model));
+    if kind == MediaKind::Image {
+        if let Some(options) = &model.openrouter {
+            let max = options
+                .image_parameters
+                .get("input_references")
+                .and_then(|parameter| parameter.max.as_deref()?.parse::<usize>().ok())
+                .unwrap_or(MAX_OPENROUTER_EDIT_SOURCES);
+            if draft.references.peek().len() + urls.len() > max {
+                return Err("controls.model_reference_limit");
+            }
+        }
+        attach_edit_batch(&mut draft, urls)?;
+    } else if allows_multiple(kind, model) {
+        let mut references = draft.references.write();
+        let before = references.len();
+        let mode = mode_for_input(kind, draft.mode, model, before + urls.len())
+            .ok_or("controls.too_many_video_references")?;
+        references.extend(urls.into_iter().map(|data_url| Reference { data_url }));
+        if draft.provider == Provider::CheaperInference
+            && VideoLimits::for_model(&model.id, mode)
+                .is_some_and(|limits| !limits.supports_references(&references))
+        {
+            references.truncate(before);
+            return Err("controls.veo_references");
+        }
+    } else if urls.len() == 1 {
+        draft.references.set(
+            urls.into_iter()
+                .map(|data_url| Reference { data_url })
+                .collect(),
+        );
     } else {
-        draft.references.write().extend(added);
+        return Err("controls.too_many_video_references");
+    }
+    draft.reference_intent.set(None);
+    if kind == MediaKind::Video
+        && let Some(mode) = draft.mode_for(kind, Some(model))
+        && previous_mode != Some(mode)
+    {
+        draft.adapt_video_params(mode);
     }
     Ok(())
 }
 
 #[component]
-pub(super) fn StudioUploads(mut draft: StudioDraft, reading: Signal<bool>) -> Element {
-    let mode = draft.mode;
+pub(super) fn StudioUploads(
+    mut draft: StudioDraft,
+    kind: MediaKind,
+    reading: Signal<bool>,
+    selected: Option<CatalogModel>,
+) -> Element {
     let first_label = use_t("studio.first_frame");
-    let reference_label = use_t("studio.add_reference");
+    let add_reference = use_t("studio.add_reference");
+    let add_first = use_t("gen.add_first_frame");
+    let replace_first = use_t("gen.replace_frame");
     let reference_alt = use_t("studio.reference");
     let mask_label = use_t("studio.mask");
-    let state = use_context::<AppState>();
+    let unsupported = use_t("controls.model_no_references");
+    let lang = (use_context::<AppState>().lang)();
     let mut error = use_signal(|| None::<&'static str>);
-    let add_source = use_callback(move |urls: Vec<String>| {
-        error.set(add_sources(draft, urls).err());
-    });
+    let mode = draft.mode_for(kind, selected.as_ref());
     let references = draft.references.read();
+    let mode_after_remove = selected.as_ref().and_then(|model| {
+        mode_for_input(kind, draft.mode, model, references.len().saturating_sub(1))
+    });
+    let upload_kind = file_mode(draft.provider, kind, selected.as_ref());
+    let multiple = selected
+        .as_ref()
+        .is_some_and(|model| allows_multiple(kind, model));
+    let label = match (kind, upload_kind, multiple, references.is_empty()) {
+        (MediaKind::Video, Some(_), false, true) => add_first,
+        (MediaKind::Video, Some(_), false, false) => replace_first,
+        _ => add_reference,
+    };
+    let show_mask =
+        mode == Some(GenMode::ImageEdit) && draft.provider == Provider::CheaperInference;
+    let has_model = selected.is_some();
+    let picker_key = selected
+        .as_ref()
+        .map_or(String::new(), |model| model.id.clone());
+    let add_source = use_callback(move |urls: Vec<String>| {
+        if let Some(model) = &selected {
+            error.set(accept_files(draft, kind, model, urls).err());
+        }
+    });
     rsx! {
         div { class: "studio-uploads",
-            if mode == GenMode::ImageToVideo {
-                SingleUpload {
-                    label: first_label, kind: UploadKind::Image,reading,
-                    value: references.first().map(|r| r.data_url.clone()),
-                    on_set: move |url: Option<String>| {
-                        draft.references.set(url.into_iter().map(|data_url| Reference { data_url }).collect());
-                    },
-                }
-            } else {
-                div { class: "studio-upload-slot",
+            div { class: "studio-upload-slot",
+                if let Some(upload_kind) = upload_kind {
                     FilePicker {
-                        kind: if mode == GenMode::ImageEdit { UploadKind::EditSource } else { UploadKind::Image },
-                        label: reference_label.to_owned(), multiple:true,reading,on_load: add_source,
+                        key: "{picker_key}", kind: upload_kind, label: label.to_owned(), multiple,
+                        reading, on_load: add_source,
                     }
-                    SourceUrl { on_add: move |url|add_source.call(vec![url]) }
-                    if !references.is_empty() {
-                        div { class: "reference-list",
-                            for (index, reference) in references.iter().enumerate() {
-                                ReferencePreview {
-                                    key: "{index}", src: reference.data_url.clone(),
-                                    label: format!("{reference_alt} {}", index + 1),
-                                    on_remove: move |_| { draft.references.write().remove(index); error.set(None); },
-                                }
+                    SourceUrl { disabled: reading(), on_add: move |url| add_source.call(vec![url]) }
+                } else {
+                    button { class: "upload-area", r#type: "button", disabled: true,
+                        title: has_model.then_some(unsupported),
+                        span { class: "studio-icon", "data-icon": "plus", aria_hidden: "true" }
+                        strong { {add_reference} }
+                    }
+                }
+                if !references.is_empty() {
+                    div { class: "reference-list",
+                        for (index, reference) in references.iter().enumerate() {
+                            ReferencePreview {
+                                key: "{index}", src: reference.data_url.clone(),
+                                label: if mode == Some(GenMode::ImageToVideo) { first_label.to_owned() } else { format!("{reference_alt} {}", index + 1) },
+                                on_remove: move |_| {
+                                    let empty = {
+                                        let mut sources = draft.references.write();
+                                        sources.remove(index);
+                                        sources.is_empty()
+                                    };
+                                    if empty { draft.mask.set(None); }
+                                    draft.reference_intent.set(None);
+                                    if kind == MediaKind::Video
+                                        && let Some(next_mode) = mode_after_remove
+                                        && mode != Some(next_mode)
+                                    {
+                                        draft.adapt_video_params(next_mode);
+                                    }
+                                    error.set(None);
+                                },
                             }
                         }
                     }
                 }
-                if mode == GenMode::ImageEdit {
-                    details { class:"generator-mask",
-                      summary { {mask_label} if draft.mask.read().is_some() {" ✓"} }
-                      SingleUpload {
-                        label: mask_label, kind: UploadKind::PngMask, reading, value: (draft.mask)(),
-                        on_set: move |url: Option<String>| {
-                            let size = draft.references.peek().iter().map(|r| inline_bytes(&r.data_url)).sum::<usize>();
-                            if url.as_deref().is_some_and(|mask| size + inline_bytes(mask) > MAX_REQUEST_WIRE_BYTES) {
-                                error.set(Some("controls.edit_wire_limit"));
-                            } else {
-                                error.set(None);
-                                draft.mask.set(url);
+            }
+            if show_mask {
+                details { class: "generator-mask",
+                    summary { {mask_label} if draft.mask.read().is_some() { " ✓" } }
+                    FilePicker {
+                        key: "{picker_key}", kind: UploadKind::PngMask, label: mask_label.to_owned(), reading,
+                        on_load: move |urls: Vec<String>| {
+                            let references = draft.references.peek();
+                            if !references.is_empty() && let Some(url) = urls.into_iter().next() {
+                                let size = references.iter().map(|r| inline_bytes(&r.data_url)).sum::<usize>();
+                                if size + inline_bytes(&url) > MAX_REQUEST_WIRE_BYTES {
+                                    error.set(Some("controls.edit_wire_limit"));
+                                } else {
+                                    error.set(None);
+                                    draft.mask.set(Some(url));
+                                }
                             }
-                        },
-                      }
+                        }
+                    }
+                    if let Some(src) = (draft.mask)() {
+                        ReferencePreview { src, label: mask_label.to_owned(), on_remove: move |_| draft.mask.set(None) }
                     }
                 }
             }
             if let Some(key) = error() {
-                p { class: "status status-error", role: "alert", {tr((state.lang)(), key)} }
+                p { class: "status status-error", role: "alert", {km_ui_core::i18n::tr(lang, key)} }
             }
         }
     }
 }
 
 #[component]
-fn SourceUrl(on_add: Callback<String>) -> Element {
+fn SourceUrl(disabled: bool, on_add: Callback<String>) -> Element {
     let label = use_t("controls.image_url");
     let add = use_t("controls.add_url");
     let invalid = use_t("controls.invalid_url");
@@ -160,9 +219,9 @@ fn SourceUrl(on_add: Callback<String>) -> Element {
         details { class: "extra-params",
             summary { {label} }
             div { class: "field-row",
-                input { class: "text-input", r#type: "url", aria_label: label, value: value(),
+                input { class: "text-input", r#type: "url", aria_label: label, value: value(), disabled,
                     placeholder: "https://…", oninput: move |event| { error.set(false); value.set(event.value()); } }
-                button { r#type: "button", class: "btn", disabled: value.read().trim().is_empty(),
+                button { r#type: "button", class: "btn", disabled: disabled || value.read().trim().is_empty(),
                     onclick: move |_| {
                         let raw = value.peek().trim().to_owned();
                         if web_sys::Url::new(&raw).is_ok_and(|url| matches!(url.protocol().as_str(), "http:" | "https:") && !url.hostname().is_empty()) {
@@ -173,27 +232,6 @@ fn SourceUrl(on_add: Callback<String>) -> Element {
                     }, {add} }
             }
             if error() { p { class: "status-error", role: "alert", {invalid} } }
-        }
-    }
-}
-
-#[component]
-fn SingleUpload(
-    label: &'static str,
-    kind: UploadKind,
-    reading: Signal<bool>,
-    value: Option<String>,
-    on_set: Callback<Option<String>>,
-) -> Element {
-    rsx! {
-        div { class: "studio-upload-slot",
-            FilePicker { kind, reading,label: label.to_owned(), on_load: move |urls:Vec<String>| on_set.call(urls.into_iter().next()) }
-            if kind == UploadKind::Image {
-                SourceUrl { on_add: move |url| on_set.call(Some(url)) }
-            }
-            if let Some(src) = value {
-                ReferencePreview { src, label: label.to_owned(), on_remove: move |_| on_set.call(None) }
-            }
         }
     }
 }

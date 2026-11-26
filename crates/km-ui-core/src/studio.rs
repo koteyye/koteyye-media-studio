@@ -38,6 +38,7 @@ pub fn pending_reason(lang: km_shared::Lang, reason: &str) -> &str {
         "history.recovery_access" => crate::i18n::tr(lang, "history.recovery_access"),
         "history.recovery_not_found" => crate::i18n::tr(lang, "history.recovery_not_found"),
         "history.recovery_response" => crate::i18n::tr(lang, "history.recovery_response"),
+        "history.recovery_unavailable" => crate::i18n::tr(lang, "history.recovery_unavailable"),
         _ => reason,
     }
 }
@@ -61,6 +62,46 @@ pub fn models_for(models: &[CatalogModel], kind: MediaKind, mode: GenMode) -> Ve
     models
         .iter()
         .filter(|m| m.matches_kind(kind) && m.supports_mode(mode))
+        .collect()
+}
+
+pub fn mode_for_input(
+    kind: MediaKind,
+    audio_mode: GenMode,
+    model: &CatalogModel,
+    reference_count: usize,
+) -> Option<GenMode> {
+    if !model.matches_kind(kind) {
+        return None;
+    }
+    let mode = match (kind, reference_count) {
+        (MediaKind::Image, 0) => GenMode::TextToImage,
+        (MediaKind::Image, _) => GenMode::ImageEdit,
+        (MediaKind::Video, 0) => GenMode::TextToVideo,
+        (MediaKind::Video, 1) if model.supports_mode(GenMode::ImageToVideo) => {
+            GenMode::ImageToVideo
+        }
+        (MediaKind::Video, _) => GenMode::ReferenceToVideo,
+        (MediaKind::Audio, _) => audio_mode,
+    };
+    model.supports_mode(mode).then_some(mode)
+}
+
+/// A model that requires attachments is selectable before the first attachment.
+pub fn models_for_input(
+    models: &[CatalogModel],
+    kind: MediaKind,
+    mode: GenMode,
+    reference_count: usize,
+) -> Vec<&CatalogModel> {
+    models
+        .iter()
+        .filter(|model| {
+            mode_for_input(kind, mode, model, reference_count).is_some()
+                || (reference_count == 0
+                    && kind != MediaKind::Audio
+                    && mode_for_input(kind, mode, model, 1).is_some())
+        })
         .collect()
 }
 
@@ -250,7 +291,7 @@ fn image_rates(
         if !rates.is_empty() {
             return Some(rates);
         }
-        if mode == GenMode::ImageEdit {
+        if mode == GenMode::ImageEdit && model.openrouter.is_none() {
             return None;
         }
     }
@@ -362,12 +403,21 @@ fn video_rate(model: &CatalogModel, params: &GenParams, mode: Option<GenMode>) -
             _ => return None,
         });
     }
-    if params.audio.is_none() && model.media_prices.contains_key(&format!("{variant}+AUDIO")) {
+    let audio_variant = format!("{variant}+AUDIO");
+    let priced_with_audio = model.media_prices.contains_key(&audio_variant);
+    let audio = if priced_with_audio {
+        params
+            .audio
+            .or_else(|| model.openrouter.as_ref()?.video_generate_audio)
+    } else {
+        params.audio
+    };
+    if audio.is_none() && priced_with_audio {
         // У модели два тарифа для этого разрешения, а её настройка звука по умолчанию неизвестна.
         return None;
     }
-    if params.audio == Some(true) {
-        variant.push_str("+AUDIO");
+    if audio == Some(true) && (model.openrouter.is_none() || priced_with_audio) {
+        variant = audio_variant;
     }
     model.media_prices.get(&variant).and_then(|s| amount(s))
 }
@@ -428,6 +478,7 @@ fn estimate(
 pub enum UploadKind {
     Image,
     EditSource,
+    OpenRouterEditSource,
     PngMask,
     Audio,
 }
@@ -436,7 +487,7 @@ impl UploadKind {
     pub fn accept(self) -> &'static str {
         match self {
             Self::Image => "image/png,image/jpeg,image/webp,image/gif",
-            Self::EditSource => "image/png,image/jpeg,image/webp",
+            Self::EditSource | Self::OpenRouterEditSource => "image/png,image/jpeg,image/webp",
             Self::PngMask => "image/png",
             Self::Audio => "audio/mpeg,audio/wav,audio/x-wav,audio/ogg",
         }
@@ -444,6 +495,7 @@ impl UploadKind {
 }
 
 pub const MAX_UPLOAD_BYTES: u64 = 20 * 1024 * 1024;
+pub const MAX_OPENROUTER_EDIT_SOURCES: usize = 16;
 
 /// Ключ ошибки переводится в тот язык, который выбран сейчас в интерфейсе.
 pub fn validate_upload(mime: &str, size_bytes: u64, kind: UploadKind) -> Result<(), &'static str> {

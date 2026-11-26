@@ -4,6 +4,7 @@ use km_shared::MediaKind;
 use km_ui_core::format::format_usd;
 use wasm_bindgen::{JsCast, closure::Closure};
 
+use super::error_notice::ErrorNotice;
 use crate::router::Route;
 use crate::state::{AppState, use_t};
 
@@ -16,7 +17,6 @@ pub fn Layout() -> Element {
     let loading = use_t("common.loading");
     let spend = use_t("common.spend");
     let local_spend = use_t("ws.local_spend");
-    let error_label = use_t("common.error");
     let close = use_t("common.close");
     let sections = [
         (MediaKind::Image, "image", use_t("studio.image")),
@@ -110,7 +110,7 @@ pub fn Layout() -> Element {
             main {class:"content",
                 if let Some(message)=error {
                     div {class:"error-banner",role:"alert",
-                        span {class:"error-banner-text","{error_label}: {message}"}
+                        div {class:"error-banner-text",ErrorNotice { message }}
                         button {class:"banner-dismiss",title:close,aria_label:close,onclick:move |_|state.dismiss_error(),"×"}
                     }
                 }

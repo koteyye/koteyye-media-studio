@@ -53,6 +53,27 @@
 .sw-wallet-actions { justify-content:flex-end; }
 .sw-wallet-value { color:var(--text);font-variant-numeric:tabular-nums;font-weight:600; }
 .sw-wallet-account .sw-note { max-width:65%;text-align:right; }
+.sw-mcp { max-width:760px; }
+.sw-mcp-status { min-height:24px; margin-top:4px; }
+.sw-workspace .sw-mcp-error { margin-top:4px; overflow-wrap:anywhere; }
+.sw-mcp-endpoint { display:grid; gap:5px; margin-top:12px; }
+.sw-mcp-endpoint .text-input { width:min(100%, 370px); }
+.sw-mcp-endpoint input, .sw-mcp-code code { font-family:var(--font-mono, monospace); }
+.sw-mcp-code { position:relative; margin:8px 0 10px; border:1px solid var(--control-border,var(--border)); border-radius:5px; background:var(--surface-2,var(--surface)); }
+.sw-mcp-code pre { max-height:9rem; overflow:auto; margin:0; padding:10px 46px 10px 11px; border-radius:5px; white-space:pre-wrap; overflow-wrap:anywhere; -webkit-user-select:text; user-select:text; }
+.sw-mcp-code pre:focus-visible { outline:2px solid var(--focus,var(--accent-text)); outline-offset:2px; }
+.sw-mcp-code code { font-size:12px; line-height:1.5; }
+.sw-mcp-code .sw-mcp-copy { position:absolute; inset:6px 6px auto auto; display:grid; place-items:center; min-height:30px; width:30px; padding:0; }
+.sw-mcp-copy-icon { position:relative; width:14px; height:14px; }
+.sw-mcp-copy-icon::before,.sw-mcp-copy-icon::after { content:""; position:absolute; width:9px; height:10px; border:1px solid currentColor; border-radius:2px; background:var(--surface); }
+.sw-mcp-copy-icon::before { inset:0 auto auto 0; }
+.sw-mcp-copy-icon::after { inset:auto 0 0 auto; }
+.sw-mcp-copy-feedback { margin-top:7px; }
+.sw-workspace .sw-mcp-model-provider { margin-top:8px;font-size:13px;font-weight:600; }
+.sw-mcp-model-group { margin-top:14px; }
+.sw-mcp-model-group h3 { margin:0;font-size:13px;font-weight:600; }
+.sw-mcp-model-group select { width:55%; }
+.sw-mcp-catalog { margin-top:4px; }
 .sw-grid { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:clamp(15px,3vw,45px);align-items:start; }
 .sw-separated,.sw-footer { border-top:1px solid var(--border); margin-top:14px;padding-top:16px; }
 .sw-footer { flex-wrap:wrap;justify-content:flex-end; }

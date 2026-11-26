@@ -19,7 +19,7 @@ futures-channel = "0.3.34"
 js-sys = "0.3.107"
 # Window/Document/Element — data-theme и lang на <html>; MediaQueryList — резолв System.
 web-sys = { version = "0.3.107", features = [
-    "console", "Window", "Document", "KeyboardEvent", "Element", "MediaQueryList", "MediaQueryListEvent",
+    "console", "Window", "Document", "KeyboardEvent", "Element", "MediaQueryList", "MediaQueryListEvent", "Navigator",
     "Blob", "File", "FileReader", "HtmlDialogElement", "HtmlInputElement", "AudioBuffer", "CanvasRenderingContext2d",
     "CssStyleDeclaration", "HtmlCanvasElement", "HtmlMediaElement", "OfflineAudioContext", "Response", "Url",
 ] }

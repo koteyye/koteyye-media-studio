@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use km_core::{CoreError, by_kind};
+use km_core::{CoreError, Jobs, by_kind};
 use km_shared::{
     AppEvent, BalanceUnavailable, BalanceView, CatalogModel, GenerationRequest, HistoryFilter,
     HistoryRecord, JobStatus, MediaKind, Provider, Settings,
@@ -112,15 +112,19 @@ fn foreign_key(provider: Provider, key: &str) -> Option<Provider> {
     }
 }
 
-async fn stored_ci_key(state: &AppState) -> Result<Option<String>, String> {
-    let key = state.read_key(Provider::CheaperInference).await?;
-    if key
-        .as_ref()
-        .is_some_and(|k| foreign_key(Provider::CheaperInference, k.trim()).is_some())
-    {
-        return Err("в профиле Cheaper Inference сохранён ключ OpenRouter".into());
+async fn stored_key(state: &AppState, provider: Provider) -> Result<Option<String>, String> {
+    let Some(key) = state.read_key(provider).await? else {
+        return Ok(None);
+    };
+    let key = key.trim();
+    if let Some(other) = foreign_key(provider, key) {
+        return Err(format!(
+            "в профиле {} сохранён ключ {}",
+            provider.name(),
+            other.name()
+        ));
     }
-    Ok(key)
+    Ok((!key.is_empty()).then(|| key.to_owned()))
 }
 
 /// Проверка подключения: лёгкий auth-запрос `GET /v1/models` с Bearer.
@@ -189,11 +193,27 @@ pub async fn cmd_fetch_models(
     state: &AppState,
     kind: MediaKind,
 ) -> Result<Vec<CatalogModel>, String> {
-    let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
-    if settings.provider == Provider::OpenRouter {
-        return Ok(Vec::new());
+    let provider = state
+        .storage
+        .get_settings()
+        .map_err(|err| err.to_string())?
+        .provider;
+    cmd_fetch_models_for(state, provider, kind).await
+}
+
+pub async fn cmd_fetch_models_for(
+    state: &AppState,
+    provider: Provider,
+    kind: MediaKind,
+) -> Result<Vec<CatalogModel>, String> {
+    let key = stored_key(state, provider).await?;
+    if provider == Provider::OpenRouter {
+        return state
+            .openrouter
+            .models_for_kind(key.as_deref().unwrap_or_default(), kind)
+            .await
+            .map_err(|err| provider_error(provider, err));
     }
-    let key = stored_ci_key(state).await?;
     let client = state.client(key.as_deref().unwrap_or_default());
     let models = match key {
         Some(_) => client.models_for_kind(kind).await,
@@ -228,23 +248,113 @@ pub async fn cmd_generate_for(
 ) -> Result<HistoryRecord, String> {
     // Восстановление без request_id помечает запись как прерванную. Пока
     // идёт запрос, Pending без request_id — нормальное состояние живой задачи.
-    let _running = state.recovery_lock().read().await;
+    let _running = state.hold_generation().await?;
+    let jobs = generation_jobs(state, provider).await?;
+    let record = jobs
+        .run(req)
+        .await
+        .map_err(|err| provider_error(provider, err));
+    state.emit(AppEvent::BalanceUpdated);
+    record
+}
+
+async fn generation_jobs(state: &AppState, provider: Provider) -> Result<Jobs, String> {
     let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
-    if provider == Provider::OpenRouter || settings.provider == Provider::OpenRouter {
-        return Err("Генерация через OpenRouter пока недоступна".into());
+    let profile_changed = || {
+        format!(
+            "Изменился активный провайдер генерации ({})",
+            provider.name()
+        )
+    };
+    if settings.provider != provider {
+        return Err(profile_changed());
     }
-    let key = stored_ci_key(state)
-        .await?
-        .ok_or_else(|| CoreError::NoKey.to_string())?;
+    let revision = state.balance_revision(provider);
+    let key = stored_key(state, provider).await?;
+    let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
+    if settings.provider != provider || state.balance_revision(provider) != revision {
+        return Err(profile_changed());
+    }
+    let key = key.ok_or_else(|| provider_error(provider, CoreError::NoKey))?;
     if settings.local_folder.is_empty() {
         return Err(
             CoreError::Validation("папка сохранения не задана в настройках".to_owned()).to_string(),
         );
     }
-    let jobs = state.jobs(state.client(&key), PathBuf::from(settings.local_folder))?;
-    let record = jobs.run(req).await.map_err(|e| e.to_string())?;
-    state.emit(AppEvent::BalanceUpdated);
+    state.jobs_for(provider, key, PathBuf::from(settings.local_folder))
+}
+
+pub(crate) async fn cmd_start_generation(
+    state: &Arc<AppState>,
+    provider: Provider,
+    req: GenerationRequest,
+    idempotency_key: uuid::Uuid,
+    model_was_omitted: bool,
+) -> Result<HistoryRecord, String> {
+    let id = idempotency_key.to_string();
+    let request = serde_json::to_string(&req).map_err(|err| err.to_string())?;
+    let model = req.model.clone();
+    let existing = || -> Result<Option<HistoryRecord>, String> {
+        state
+            .storage
+            .history_record(&id)
+            .map_err(|err| err.to_string())?
+            .map(|record| {
+                if record.provider != provider {
+                    return Err("This idempotency_key belongs to a different generation".into());
+                }
+                let same_request = record.params_json == request
+                    || (model_was_omitted
+                        && record.model != model
+                        && serde_json::from_str::<GenerationRequest>(&record.params_json)
+                            .ok()
+                            .and_then(|mut previous| {
+                                previous.model.clone_from(&model);
+                                serde_json::to_string(&previous).ok()
+                            })
+                            .is_some_and(|previous| previous == request));
+                if same_request {
+                    Ok(record)
+                } else {
+                    Err("This idempotency_key belongs to a different generation".into())
+                }
+            })
+            .transpose()
+    };
+    if let Some(record) = existing()? {
+        return Ok(record);
+    }
+    let running = state.hold_generation().await?;
+    let jobs = generation_jobs(state, provider).await?;
+    let begin = state
+        .mcp
+        .with_model_policy(provider, req.mode, &model, model_was_omitted, || {
+            jobs.begin(req, idempotency_key)
+        })
+        .await
+        .and_then(|result| result.map_err(|err| provider_error(provider, err)));
+    let generation = match begin {
+        Ok(generation) => generation,
+        Err(err) => return existing()?.ok_or(err),
+    };
+    let record = generation.record().clone();
+    let state = Arc::clone(state);
+    tokio::spawn(async move {
+        let _running = running;
+        if let Err(err) = jobs.finish(generation).await {
+            eprintln!("MCP generation: {err}");
+        }
+        state.emit(AppEvent::BalanceUpdated);
+    });
     Ok(record)
+}
+
+fn provider_error(provider: Provider, err: CoreError) -> String {
+    match (provider, err) {
+        (Provider::OpenRouter, CoreError::Timeout) => "таймаут запроса к OpenRouter".into(),
+        (Provider::OpenRouter, CoreError::NoKey) => "не задан API-ключ OpenRouter".into(),
+        (_, err) => err.to_string(),
+    }
 }
 
 /// Список истории с фильтром, новые первыми.
@@ -273,10 +383,9 @@ pub async fn cmd_delete_history(state: &AppState, id: &str) -> Result<(), String
 /// Вызывается и при старте (фоном, из `setup`), и вручную из UI. Проходы
 /// сериализованы локом [`AppState::recovery_lock`]: параллельные вызовы не
 /// обрабатывают одни записи дважды (без дублей файлов и событий). После
-/// восстановления завершённых записей шлёт `balance:updated`. Без ключа
-/// CI не опросить, без папки сохранения некуда писать файлы: записи остаются
-/// `Pending` до следующего запуска с ключом и папкой (оплаченная генерация
-/// могла завершиться на сервере, файлы живут 7 дней).
+/// восстановления завершённых записей шлёт `balance:updated`. Ключ берётся
+/// из профиля, в котором была запущена генерация. Пока ключа или папки нет,
+/// запись ждёт следующего прохода в статусе `Pending`.
 ///
 /// # Errors
 ///
@@ -288,27 +397,58 @@ pub async fn cmd_recover_pending(state: &AppState) -> Result<Vec<HistoryRecord>,
     // Сериализация проходов: setup при старте и load() UI зовут эту команду;
     // без лока оба прочитали бы одни Pending и скачали бы файлы дважды.
     let _guard = state.recovery_lock().write().await;
-    let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
-    if settings.local_folder.is_empty()
-        || !state
-            .storage
-            .has_pending_for(Provider::CheaperInference)
-            .map_err(|e| e.to_string())?
-    {
-        return Ok(Vec::new());
-    }
-    // Активный профиль здесь роли не играет: восстановление привязано к источнику записи.
-    let Some(key) = stored_ci_key(state).await? else {
-        // Без ключа запрос с пустым Bearer дал бы 401 и ядро сожгло бы
-        // восстановимые записи в Failed навсегда — оставляем Pending.
+    let Some(_process) = state.try_hold_recovery()? else {
         return Ok(Vec::new());
     };
-    let jobs = state.jobs(state.client(&key), PathBuf::from(settings.local_folder))?;
-    let recovered = jobs.recover_pending().await.map_err(|e| e.to_string())?;
-    if recovered.iter().any(|r| r.status == JobStatus::Completed) {
+    let settings = state.storage.get_settings().map_err(|e| e.to_string())?;
+    if settings.local_folder.is_empty() {
+        return Ok(Vec::new());
+    }
+    let folder = PathBuf::from(settings.local_folder);
+    let mut recovered = Vec::new();
+    let mut error = None;
+    for provider in [Provider::CheaperInference, Provider::OpenRouter] {
+        match recover_provider(state, provider, &folder).await {
+            Ok(records) => recovered.extend(records),
+            Err(err) => {
+                eprintln!("восстановление профиля {}: {err}", provider.name());
+                error = Some(err);
+            }
+        }
+    }
+    if recovered.is_empty()
+        && let Some(err) = error
+    {
+        return Err(err);
+    }
+    if recovered.iter().any(|r| {
+        r.status == JobStatus::Completed
+            || (r.provider == Provider::OpenRouter && r.cost_usd.is_some())
+    }) {
         state.emit(AppEvent::BalanceUpdated);
     }
     Ok(recovered)
+}
+
+async fn recover_provider(
+    state: &AppState,
+    provider: Provider,
+    folder: &Path,
+) -> Result<Vec<HistoryRecord>, String> {
+    if !state
+        .storage
+        .has_pending_for(provider)
+        .map_err(|err| err.to_string())?
+    {
+        return Ok(Vec::new());
+    }
+    let Some(key) = stored_key(state, provider).await? else {
+        return Ok(Vec::new());
+    };
+    let jobs = state.jobs_for(provider, key, folder.to_owned())?;
+    jobs.recover_pending()
+        .await
+        .map_err(|err| provider_error(provider, err))
 }
 
 /// Реальный кошелёк, если включён в настройках, и локальный расход активного профиля.
@@ -430,10 +570,22 @@ pub async fn cmd_show_in_folder(state: &AppState, path: &str) -> Result<PathBuf,
 
 // --- Тонкие обёртки #[tauri::command]: State -> cmd_* -> Result для UI ---
 
+#[tauri::command]
+pub fn system_language() -> Option<km_shared::Lang> {
+    km_shared::Lang::detect_system()
+}
+
 /// Настройки приложения.
 #[tauri::command]
 pub async fn get_settings(state: State<'_, Arc<AppState>>) -> Result<Settings, String> {
     cmd_get_settings(&state).await
+}
+
+#[tauri::command]
+pub fn open_provider_api_keys(app: AppHandle, provider: Provider) -> Result<(), String> {
+    app.opener()
+        .open_url(provider.api_keys_url(), None::<&str>)
+        .map_err(|err| format!("Could not open provider key page: {err}"))
 }
 
 /// Сохранить настройки.
@@ -447,17 +599,17 @@ pub async fn set_settings(
         .settings_write
         .lock()
         .map_err(|_| "не удалось заблокировать настройки")?;
-    let prior = state
-        .storage
-        .get_settings()
-        .map_err(|e| e.to_string())?
-        .provider;
+    let prior = state.storage.get_settings().map_err(|e| e.to_string())?;
     let saved = state
         .storage
         .merge_settings(settings)
         .map_err(|e| e.to_string())?;
-    state.provider_changed(prior, saved.provider);
+    state.provider_changed(prior.provider, saved.provider);
     crate::apply_native_theme(&app, saved.theme);
+    #[cfg(target_os = "macos")]
+    if prior.lang != saved.lang {
+        crate::native_menu::apply(&app, saved.lang);
+    }
     Ok(())
 }
 
@@ -507,8 +659,12 @@ pub async fn test_connection(
 pub async fn fetch_models(
     state: State<'_, Arc<AppState>>,
     kind: MediaKind,
+    provider: Option<Provider>,
 ) -> Result<Vec<CatalogModel>, String> {
-    cmd_fetch_models(&state, kind).await
+    match provider {
+        Some(provider) => cmd_fetch_models_for(&state, provider, kind).await,
+        None => cmd_fetch_models(&state, kind).await,
+    }
 }
 
 /// Запустить генерацию.
@@ -585,9 +741,12 @@ pub async fn delete_history(state: State<'_, Arc<AppState>>, id: String) -> Resu
 /// Восстановить незавершённые генерации.
 #[tauri::command]
 pub async fn recover_pending(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<HistoryRecord>, String> {
-    cmd_recover_pending(&state).await
+    let records = cmd_recover_pending(&state).await?;
+    allow_result_previews(&app, &records);
+    Ok(records)
 }
 
 /// Гибридный баланс: реальный из CI плюс локальный расход.
@@ -607,11 +766,16 @@ pub async fn fetch_balance(
 /// Диалог исполняется на главном потоке (внутри плагина), ожидание —
 /// в блокирующем пуле, чтобы не занимать IPC-поток.
 #[tauri::command]
-pub async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
-    let folder =
-        tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_folder())
-            .await
-            .map_err(|e| format!("диалог выбора папки не завершился: {e}"))?;
+pub async fn pick_folder(app: AppHandle, title: Option<String>) -> Result<Option<String>, String> {
+    let folder = tauri::async_runtime::spawn_blocking(move || {
+        let dialog = app.dialog().file();
+        match title {
+            Some(title) => dialog.set_title(title).blocking_pick_folder(),
+            None => dialog.blocking_pick_folder(),
+        }
+    })
+    .await
+    .map_err(|e| format!("диалог выбора папки не завершился: {e}"))?;
     Ok(folder.map(|path| path.to_string()))
 }
 

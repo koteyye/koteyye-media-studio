@@ -6,17 +6,22 @@ pub const MAX_REQUEST_WIRE_BYTES: usize = 4_500_000;
 mod events;
 mod history;
 pub mod image;
+mod mcp;
 mod models;
 mod requests;
 mod responses;
 pub mod video;
 
 pub use events::{
-    AppEvent, BalanceUnavailable, BalanceView, Lang, ModelChoice, OpenRouterCredits, Provider,
-    Settings, Theme, WorkspacePrefs,
+    AppEvent, BalanceUnavailable, BalanceView, Lang, LangPreference, ModelChoice,
+    OpenRouterCredits, Provider, Settings, Theme, WorkspacePrefs,
 };
 pub use history::{HistoryFilter, HistoryPatch, HistoryRecord, JobStatus};
-pub use models::{CatalogModel, CatalogPricingScope, MediaPrices, ModelType};
+pub use mcp::{MCP_PORT, McpModelDefaults, McpStatus};
+pub use models::{
+    CatalogModel, CatalogParameter, CatalogPricingScope, CatalogRates, CatalogTier, MediaPrices,
+    ModelType, OpenRouterModelOptions,
+};
 pub use requests::{GenMode, GenParams, GenerationRequest, MediaKind, Reference};
 pub use responses::{
     AccountBalance, AudioOutput, Billing, Generation, GenerationFile, ImageItem, ImageResponse,

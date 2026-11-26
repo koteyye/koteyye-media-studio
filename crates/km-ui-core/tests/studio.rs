@@ -118,6 +118,51 @@ fn editing_keeps_references_mask_and_parameters() {
 }
 
 #[test]
+fn attachment_count_selects_the_supported_generation_mode() {
+    let models: Vec<CatalogModel> = serde_json::from_value(serde_json::json!([
+        {"id":"image-text","model_type":"image","supported_endpoints":["/v1/images/generations"]},
+        {"id":"image-edit","model_type":"image","supports_image_edit":true,"supported_endpoints":["/v1/images/edits"]},
+        {"id":"video-frame","model_type":"video","openrouter":{"modes":["image_to_video"]}},
+        {"id":"video-refs","model_type":"video","openrouter":{"modes":["reference_to_video"]}},
+        {"id":"video-all","model_type":"video","openrouter":{"modes":["text_to_video","image_to_video","reference_to_video"]}}
+    ])).unwrap();
+    let image = |model: usize, count| {
+        mode_for_input(
+            MediaKind::Image,
+            GenMode::TextToImage,
+            &models[model],
+            count,
+        )
+    };
+    assert_eq!(image(0, 0), Some(GenMode::TextToImage));
+    assert_eq!(image(0, 1), None);
+    assert_eq!(image(1, 0), None);
+    assert_eq!(image(1, 1), Some(GenMode::ImageEdit));
+    assert_eq!(
+        models_for_input(&models, MediaKind::Image, GenMode::TextToImage, 0).len(),
+        2
+    );
+
+    let video = |model: usize, count| {
+        mode_for_input(
+            MediaKind::Video,
+            GenMode::TextToVideo,
+            &models[model],
+            count,
+        )
+    };
+    assert_eq!(video(2, 2), None);
+    assert_eq!(video(3, 1), Some(GenMode::ReferenceToVideo));
+    assert_eq!(video(4, 0), Some(GenMode::TextToVideo));
+    assert_eq!(video(4, 1), Some(GenMode::ImageToVideo));
+    assert_eq!(video(4, 2), Some(GenMode::ReferenceToVideo));
+    assert_eq!(
+        models_for_input(&models, MediaKind::Video, GenMode::TextToVideo, 2).len(),
+        2
+    );
+}
+
+#[test]
 fn model_picker_filters_kind_and_mode_before_grouping_and_search() {
     let all = catalog();
     assert!(models_for(&all, MediaKind::Image, GenMode::ImageToVideo).is_empty());

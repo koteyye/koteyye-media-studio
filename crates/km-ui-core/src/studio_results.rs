@@ -172,11 +172,18 @@ pub fn failed_request_id<'a>(
 }
 
 pub fn failure_explanation(diagnostic: Option<&str>) -> &'static str {
+    if diagnostic == Some("history.recovery_unavailable") {
+        return "history.recovery_unavailable";
+    }
+    if diagnostic.is_some_and(|message| message.starts_with("таймаут запроса к ")) {
+        return "gen.failure.client_timeout";
+    }
     let status = diagnostic
         .and_then(|e| e.strip_prefix("HTTP "))
         .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next())
         .and_then(|s| s.parse::<u16>().ok());
     match status {
+        Some(408 | 504) => "gen.failure.server_timeout",
         Some(500..=599) => "gen.failure.server",
         Some(401 | 403) => "gen.failure.access",
         Some(429) => "gen.failure.rate",
@@ -364,5 +371,19 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn distinguishes_client_and_provider_timeouts() {
+        assert_eq!(
+            failure_explanation(Some("таймаут запроса к Cheaper Inference")),
+            "gen.failure.client_timeout"
+        );
+        let gateway = "HTTP 504 (provider_timeout): Timed out [request_id: ci_42]";
+        assert_eq!(
+            failure_explanation(Some(gateway)),
+            "gen.failure.server_timeout"
+        );
+        assert_eq!(failed_request_id(None, Some(gateway)), Some("ci_42"));
     }
 }

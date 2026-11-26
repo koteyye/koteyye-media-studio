@@ -11,7 +11,9 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use km_shared::{HistoryFilter, HistoryPatch, HistoryRecord, JobStatus, Provider, Settings};
+use km_shared::{
+    HistoryFilter, HistoryPatch, HistoryRecord, JobStatus, MediaKind, Provider, Settings,
+};
 use rusqlite::functions::FunctionFlags;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params, params_from_iter};
@@ -263,6 +265,38 @@ impl Storage {
         self.fetch(&where_sql, values)
     }
 
+    /// Читает запись по локальному идентификатору.
+    pub fn history_record(&self, id: &str) -> Result<Option<HistoryRecord>> {
+        let sql = format!("{SELECT_HISTORY} WHERE id = ?");
+        self.lock()
+            .query_row(&sql, [id], HistoryRow::from_row)
+            .optional()
+            .map_err(db)?
+            .map(HistoryRow::into_record)
+            .transpose()
+    }
+
+    /// Страница истории без сохранённых исходников. Записи содержат до 512 символов промпта.
+    pub fn recent_history(
+        &self,
+        kind: Option<MediaKind>,
+        provider: Option<Provider>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<HistoryRecord>> {
+        let kind = kind.map(|kind| enum_to_text(&kind)).transpose()?;
+        let provider = provider
+            .map(|provider| enum_to_text(&provider))
+            .transpose()?;
+        self.fetch_rows(
+            "SELECT id, created_at, updated_at, kind, mode, model, substr(prompt, 1, 512),
+                    status, request_id, local_paths, cost_usd, '{}', error, provider
+             FROM history WHERE (?1 IS NULL OR kind = ?1) AND (?2 IS NULL OR provider = ?2)
+             ORDER BY created_at DESC, rowid DESC LIMIT ?3 OFFSET ?4",
+            params![kind, provider, limit, offset],
+        )
+    }
+
     /// Удаляет запись истории по `id`; отсутствие записи не считается ошибкой.
     ///
     /// # Errors
@@ -433,11 +467,13 @@ impl Storage {
     /// Читает записи истории с готовым условием `WHERE` и сортировкой по убыванию времени.
     fn fetch(&self, where_sql: &str, values: Vec<Value>) -> Result<Vec<HistoryRecord>> {
         let sql = format!("{SELECT_HISTORY} {where_sql} ORDER BY created_at DESC, rowid DESC");
+        self.fetch_rows(&sql, params_from_iter(values))
+    }
+
+    fn fetch_rows(&self, sql: &str, params: impl rusqlite::Params) -> Result<Vec<HistoryRecord>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(&sql).map_err(db)?;
-        let rows = stmt
-            .query_map(params_from_iter(values), HistoryRow::from_row)
-            .map_err(db)?;
+        let mut stmt = conn.prepare(sql).map_err(db)?;
+        let rows = stmt.query_map(params, HistoryRow::from_row).map_err(db)?;
         let mut records = Vec::new();
         for row in rows {
             records.push(row.map_err(db)?.into_record()?);

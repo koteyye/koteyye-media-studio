@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use km_core::{OpenRouterKeyClient, Storage};
 use km_shared::{
     AppEvent, BalanceUnavailable, GenMode, GenerationRequest, HistoryFilter, HistoryRecord,
-    JobStatus, Lang, MediaKind, Provider, Settings, Theme,
+    JobStatus, LangPreference, MediaKind, Provider, Settings, Theme,
 };
 use koteyye_media_studio::commands::{
     cmd_check_provider_key, cmd_delete_history, cmd_fetch_balance, cmd_fetch_balance_for,
@@ -84,7 +84,7 @@ fn with_folder(state: &AppState, tmp: &TempDir) -> PathBuf {
     std::fs::create_dir_all(&folder).expect("папка сохранения должна создаться");
     let settings = Settings {
         local_folder: folder.to_string_lossy().into_owned(),
-        lang: Lang::Ru,
+        lang: LangPreference::Ru,
         theme: Theme::System,
         show_real_balance: false,
         ..Settings::default()
@@ -93,7 +93,7 @@ fn with_folder(state: &AppState, tmp: &TempDir) -> PathBuf {
         .storage
         .set_settings(&settings)
         .expect("настройки должны сохраниться");
-    folder
+    dunce::canonicalize(&folder).expect("папка сохранения должна быть доступна")
 }
 
 /// Запрос текст → изображение.
@@ -384,7 +384,7 @@ async fn recover_pending_keychain_read_error_keeps_pending() {
         .storage
         .set_settings(&Settings {
             local_folder: folder.to_string_lossy().into_owned(),
-            lang: Lang::Ru,
+            lang: LangPreference::Ru,
             theme: Theme::System,
             show_real_balance: false,
             ..Settings::default()
@@ -563,7 +563,7 @@ async fn settings_roundtrip_via_commands() {
 
     let settings = Settings {
         local_folder: "/tmp/media".to_owned(),
-        lang: Lang::En,
+        lang: LangPreference::En,
         theme: Theme::Dark,
         show_real_balance: true,
         ..Settings::default()
@@ -1440,8 +1440,8 @@ async fn openrouter_workspace_never_uses_ci_keys_or_falls_back_to_ci_generation(
     assert!(
         cmd_fetch_models(&state, MediaKind::Video)
             .await
-            .unwrap()
-            .is_empty()
+            .unwrap_err()
+            .contains("keychain")
     );
     let balance = cmd_fetch_balance(&state).await.unwrap();
     assert!(balance.real.is_none());
@@ -1451,15 +1451,20 @@ async fn openrouter_workspace_never_uses_ci_keys_or_falls_back_to_ci_generation(
         cmd_generate(&state, image_request())
             .await
             .unwrap_err()
-            .contains("OpenRouter")
+            .contains("провайдер")
     );
     assert!(
         cmd_generate_for(&state, Provider::OpenRouter, image_request())
             .await
             .unwrap_err()
-            .contains("OpenRouter")
+            .contains("keychain")
     );
-    assert!(cmd_recover_pending(&state).await.unwrap().is_empty());
+    assert!(
+        cmd_recover_pending(&state)
+            .await
+            .unwrap_err()
+            .contains("keychain")
+    );
     settings.provider = Provider::CheaperInference;
     cmd_set_settings(&state, settings).await.unwrap();
     assert!(
@@ -1490,6 +1495,9 @@ async fn recovery_uses_each_records_origin_while_openrouter_is_active() {
     ours.request_id = Some("ci-receipt".into());
     let mut theirs = history_record("or", JobStatus::Pending);
     theirs.provider = Provider::OpenRouter;
+    theirs.kind = MediaKind::Video;
+    theirs.mode = GenMode::TextToVideo;
+    theirs.request_id = Some("video-receipt".into());
     state.storage.insert_history(&ours).unwrap();
     state.storage.insert_history(&theirs).unwrap();
     Mock::given(method("GET")).and(path("/v1/generations/ci-receipt"))
@@ -1504,13 +1512,166 @@ async fn recovery_uses_each_records_origin_while_openrouter_is_active() {
         .expect(1)
         .mount(&ci)
         .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/videos/video-receipt"))
+        .and(header("authorization", "Bearer or-recovery-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id":"video-receipt","status":"completed","usage":{"cost":0.42}
+        })))
+        .expect(1)
+        .mount(&or)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/videos/video-receipt/content"))
+        .and(query_param("index", "0"))
+        .and(header("authorization", "Bearer or-recovery-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"mock mp4"))
+        .expect(1)
+        .mount(&or)
+        .await;
     let recovered = cmd_recover_pending(&state).await.unwrap();
-    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered.len(), 2);
     assert_eq!(recovered[0].id, ours.id);
     assert_eq!(recovered[0].status, JobStatus::Completed);
     assert_eq!(recovered[0].provider, Provider::CheaperInference);
-    assert_eq!(state.storage.pending().unwrap(), vec![theirs]);
-    assert!(received(&or).await.is_empty());
+    assert_eq!(recovered[1].id, theirs.id);
+    assert_eq!(recovered[1].status, JobStatus::Completed);
+    assert_eq!(recovered[1].provider, Provider::OpenRouter);
+    assert_eq!(recovered[1].cost_usd, Some(0.42));
+    assert_eq!(
+        std::fs::read(&recovered[1].local_paths[0]).unwrap(),
+        b"mock mp4"
+    );
+    assert!(state.storage.pending().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn openrouter_generation_writes_profile_history_and_local_spend() {
+    let ci = MockServer::start().await;
+    let or = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let (mut state, events) = state_for(&ci, &tmp, Some("ci-key"));
+    state.openrouter = OpenRouterKeyClient::for_localhost(or.address().port());
+    let folder = with_folder(&state, &tmp);
+    let mut settings = cmd_get_settings(&state).await.unwrap();
+    settings.provider = Provider::OpenRouter;
+    cmd_set_settings(&state, settings).await.unwrap();
+    cmd_set_provider_key(&state, Provider::OpenRouter, "sk-or-v1-test")
+        .await
+        .unwrap();
+    Mock::given(method("POST"))
+        .and(path("/api/v1/images"))
+        .and(header("authorization", "Bearer sk-or-v1-test"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "gen-openrouter", "data": [{"b64_json": "aGk=", "media_type": "image/png"}],
+            "usage": {"cost": 0.025}
+        })))
+        .expect(1)
+        .mount(&or)
+        .await;
+    let rec = cmd_generate_for(&state, Provider::OpenRouter, image_request())
+        .await
+        .unwrap();
+    assert_eq!(rec.provider, Provider::OpenRouter);
+    assert_eq!(rec.status, JobStatus::Completed);
+    assert_eq!(rec.cost_usd, Some(0.025));
+    assert_eq!(rec.request_id.as_deref(), Some("gen-openrouter"));
+    assert!(PathBuf::from(&rec.local_paths[0]).starts_with(folder));
+    assert_eq!(std::fs::read(&rec.local_paths[0]).unwrap(), b"hi");
+    assert_eq!(
+        state.storage.history(&HistoryFilter::default()).unwrap(),
+        vec![rec]
+    );
+    assert_eq!(
+        cmd_fetch_balance(&state).await.unwrap().local_spend_usd,
+        0.025
+    );
+    assert_eq!(
+        state
+            .storage
+            .total_spend_usd(Provider::CheaperInference)
+            .unwrap(),
+        0.0
+    );
+    assert!(received(&ci).await.is_empty());
+    assert!(matches!(
+        events.lock().unwrap().last(),
+        Some(AppEvent::BalanceUpdated)
+    ));
+}
+
+#[tokio::test]
+async fn openrouter_video_retry_uses_persisted_job_without_resubmitting() {
+    let ci = MockServer::start().await;
+    let or = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let (mut state, _) = state_for(&ci, &tmp, None);
+    state.openrouter = OpenRouterKeyClient::for_localhost(or.address().port());
+    with_folder(&state, &tmp);
+    let mut settings = cmd_get_settings(&state).await.unwrap();
+    settings.provider = Provider::OpenRouter;
+    cmd_set_settings(&state, settings).await.unwrap();
+    cmd_set_provider_key(&state, Provider::OpenRouter, "video-key")
+        .await
+        .unwrap();
+    let completed = json!({"id":"vid-123","status":"completed","usage":{"cost":0.2}});
+    let submit = Mock::given(method("POST"))
+        .and(path("/api/v1/videos"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&completed))
+        .expect(1)
+        .mount_as_scoped(&or)
+        .await;
+    let content = Mock::given(method("GET"))
+        .and(path("/api/v1/videos/vid-123/content"))
+        .respond_with(ResponseTemplate::new(409))
+        .expect(1)
+        .mount_as_scoped(&or)
+        .await;
+    let mut request = image_request();
+    request.kind = MediaKind::Video;
+    request.mode = GenMode::TextToVideo;
+    request.model = "x-ai/grok-imagine-video".into();
+    let record = cmd_generate_for(&state, Provider::OpenRouter, request)
+        .await
+        .unwrap();
+    assert_eq!(record.status, JobStatus::Pending);
+    assert_eq!(record.request_id.as_deref(), Some("vid-123"));
+    assert_eq!(record.cost_usd, Some(0.2));
+    assert_eq!(
+        state.storage.pending().unwrap()[0].request_id,
+        record.request_id
+    );
+    drop(content);
+    let hidden = Mock::given(method("GET"))
+        .and(path("/api/v1/videos/vid-123"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount_as_scoped(&or)
+        .await;
+    let recovered = cmd_recover_pending(&state).await.unwrap();
+    assert_eq!(recovered[0].status, JobStatus::Pending);
+    assert_eq!(
+        recovered[0].error.as_deref(),
+        Some("history.recovery_access")
+    );
+    drop(hidden);
+    Mock::given(method("GET"))
+        .and(path("/api/v1/videos/vid-123"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&completed))
+        .expect(1)
+        .mount(&or)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/videos/vid-123/content"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"mp4"))
+        .expect(1)
+        .mount(&or)
+        .await;
+    let recovered = cmd_recover_pending(&state).await.unwrap();
+    assert_eq!(recovered[0].id, record.id);
+    assert_eq!(recovered[0].status, JobStatus::Completed);
+    assert!(state.storage.pending().unwrap().is_empty());
+    drop(submit);
 }
 
 #[tokio::test]

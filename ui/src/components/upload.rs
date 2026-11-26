@@ -2,20 +2,16 @@
 
 use dioxus::prelude::*;
 use dioxus::web::{WebEventExt, WebFileExt};
+use km_shared::Provider;
 use km_ui_core::i18n::tr;
-use km_ui_core::studio::{UploadKind, matches_signature, validate_upload};
+use km_ui_core::studio::{
+    MAX_OPENROUTER_EDIT_SOURCES, UploadKind, matches_signature, validate_upload,
+};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{File, FileReader, HtmlInputElement};
 
 use crate::state::{AppState, StudioDraft, use_t};
-
-pub(crate) fn attach_edit_source(
-    mut draft: StudioDraft,
-    data_url: String,
-) -> Result<(), &'static str> {
-    attach_edit_batch(&mut draft, vec![data_url])
-}
 
 pub(crate) fn attach_edit_batch(
     draft: &mut StudioDraft,
@@ -23,17 +19,26 @@ pub(crate) fn attach_edit_batch(
 ) -> Result<(), &'static str> {
     use km_shared::image::{MAX_EDIT_SOURCES, inline_bytes};
     let mut sources = draft.references.write();
-    if sources.len() + urls.len() > MAX_EDIT_SOURCES {
-        return Err("controls.edit_source_limit");
-    }
-    let bytes = sources
-        .iter()
-        .map(|r| inline_bytes(&r.data_url))
-        .sum::<usize>()
-        + draft.mask.peek().as_deref().map_or(0, inline_bytes)
-        + urls.iter().map(|u| inline_bytes(u)).sum::<usize>();
-    if bytes > km_shared::MAX_REQUEST_WIRE_BYTES {
-        return Err("controls.edit_wire_limit");
+    let count = sources.len() + urls.len();
+    match draft.provider {
+        Provider::CheaperInference => {
+            if count > MAX_EDIT_SOURCES {
+                return Err("controls.edit_source_limit");
+            }
+            let bytes = sources
+                .iter()
+                .map(|r| inline_bytes(&r.data_url))
+                .sum::<usize>()
+                + draft.mask.peek().as_deref().map_or(0, inline_bytes)
+                + urls.iter().map(|u| inline_bytes(u)).sum::<usize>();
+            if bytes > km_shared::MAX_REQUEST_WIRE_BYTES {
+                return Err("controls.edit_wire_limit");
+            }
+        }
+        Provider::OpenRouter if count > MAX_OPENROUTER_EDIT_SOURCES => {
+            return Err("controls.or_edit_source_limit");
+        }
+        Provider::OpenRouter => {}
     }
     sources.extend(
         urls.into_iter()
@@ -56,6 +61,9 @@ pub(crate) async fn read_batch(
     if kind == UploadKind::EditSource && files.len() > km_shared::image::MAX_EDIT_SOURCES {
         return Err("controls.edit_source_limit");
     }
+    if kind == UploadKind::OpenRouterEditSource && files.len() > MAX_OPENROUTER_EDIT_SOURCES {
+        return Err("controls.or_edit_source_limit");
+    }
     let size = files.iter().map(|f| f.size()).sum::<f64>();
     if matches!(kind, UploadKind::EditSource | UploadKind::PngMask)
         && size > km_shared::MAX_REQUEST_WIRE_BYTES as f64
@@ -73,6 +81,18 @@ pub(crate) async fn read_batch(
 }
 
 const READ_ERROR: &str = "controls.upload_read";
+
+// Переключение модели может убрать пикер раньше завершения FileReader.
+// Сбрасываем индикатор формы и при отмене задачи компонента.
+struct ReadingGuard(Signal<bool>);
+
+impl Drop for ReadingGuard {
+    fn drop(&mut self) {
+        if let Ok(mut reading) = self.0.try_write() {
+            *reading = false;
+        }
+    }
+}
 
 /// Во время dragover браузер ещё не раскрывает сами файлы. Маркер Files
 /// позволяет сохранить обычное перетаскивание текста в поле промпта.
@@ -151,7 +171,6 @@ pub(crate) async fn read_file_data_url(
 pub fn FilePicker(
     kind: UploadKind,
     label: String,
-    described_by: Option<&'static str>,
     #[props(default)] multiple: bool,
     mut reading: Signal<bool>,
     on_load: Callback<Vec<String>>,
@@ -176,19 +195,24 @@ pub fn FilePicker(
         };
         error.set(None);
         reading.set(true);
+        let guard = ReadingGuard(reading);
         spawn(async move {
+            let _guard = guard;
             match read_batch(files, kind, multiple).await {
                 Ok(urls) => on_load.call(urls),
                 Err(message) => error.set(Some(message)),
             }
-            reading.set(false);
         });
     };
     rsx! {
         label {
             class: if dragging() { "upload-area dragging" } else { "upload-area" },title:hint,
             ondragover: move |event| {
-                if is_file_drag(&event) { event.prevent_default(); dragging.set(true); }
+                if is_file_drag(&event) {
+                    event.prevent_default();
+                    event.stop_propagation();
+                    dragging.set(true);
+                }
             },
             ondragleave: move |_| dragging.set(false),
             ondrop: move |event| {
@@ -204,7 +228,6 @@ pub fn FilePicker(
             span { class: "upload-hint", if reading() { {loading} } else { {hint} } }
             input {
                 r#type: "file", accept: kind.accept(), multiple, disabled: reading(), aria_label: "{label}",
-                aria_describedby: described_by,
                 onchange: move |event| {
                     let files = event.files();
                     if let Some(input) = event.as_web_event().target().and_then(|el| el.dyn_into::<HtmlInputElement>().ok()) {

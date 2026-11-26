@@ -1,19 +1,36 @@
 //! Выбор совместимой модели по имени, идентификатору или провайдеру.
 
 use dioxus::prelude::*;
-use km_shared::{GenMode, MediaKind};
+use km_shared::{GenMode, Lang, MediaKind};
 use km_ui_core::i18n::tr;
 use km_ui_core::studio::{
-    PriceUnit, format_price, group_by_provider, models_for, search_models, speech_token_rates,
-    starting_rate_for_mode,
+    PriceUnit, format_price, group_by_provider, mode_for_input, models_for_input, search_models,
+    speech_token_rates, starting_rate_for_mode,
 };
 
 use crate::state::{AppState, use_t};
+
+fn feature_label(lang: Lang, feature: &str) -> Option<String> {
+    let key = match feature {
+        "image-input" => "controls.feature_image",
+        "image-edit" => "controls.feature_edit",
+        "audio-input" => "controls.feature_audio",
+        "video-input" => "controls.feature_video",
+        "structured-output" => "controls.feature_structured",
+        "implicit-caching" => "controls.feature_cache",
+        _ => {
+            let length = feature.strip_prefix("context-")?;
+            return Some(format!("{} {length}", tr(lang, "controls.feature_context")));
+        }
+    };
+    Some(tr(lang, key).into())
+}
 
 #[component]
 pub fn ModelDropdown(
     kind: MediaKind,
     mode: GenMode,
+    reference_count: usize,
     selected: String,
     on_select: Callback<String>,
 ) -> Element {
@@ -29,7 +46,12 @@ pub fn ModelDropdown(
     let mut open = use_signal(|| false);
     let mut query = use_signal(String::new);
     let catalog = state.models_by_kind.read();
-    let available = models_for(catalog.get(&kind).map_or(&[], Vec::as_slice), kind, mode);
+    let available = models_for_input(
+        catalog.get(&kind).map_or(&[], Vec::as_slice),
+        kind,
+        mode,
+        reference_count,
+    );
     let selected_name = available
         .iter()
         .find(|m| m.id == selected)
@@ -75,8 +97,16 @@ pub fn ModelDropdown(
                                 {
                                     let id = model.id.clone();
                                     let name = model.name.as_deref().unwrap_or(&model.id);
-                                    let features = model.features.join(" · ");
-                                    let price = starting_rate_for_mode(model, mode).map(|(unit, price)| {
+                                    let features = model.features.iter()
+                                        .filter_map(|feature| feature_label(lang, feature))
+                                        .collect::<Vec<_>>().join(" · ");
+                                    let model_mode = if model.id == selected && model.supports_mode(mode) {
+                                        Some(mode)
+                                    } else {
+                                        mode_for_input(kind, mode, model, reference_count)
+                                            .or_else(|| mode_for_input(kind, mode, model, 1))
+                                    };
+                                    let price = model_mode.and_then(|mode| starting_rate_for_mode(model, mode)).map(|(unit, price)| {
                                         let unit = tr(lang, match unit {
                                             PriceUnit::Image => "controls.per_image",
                                             PriceUnit::Second => "controls.per_second",

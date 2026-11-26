@@ -7,6 +7,7 @@
 //! восстановление: проходы сериализуются локом [`AppState::recovery_lock`],
 //! чтобы стартовый проход и проход из UI не обработали одни Pending дважды.
 
+use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -17,10 +18,16 @@ use km_shared::{AppEvent, Provider};
 use tauri::async_runtime::RwLock;
 
 use crate::keychain::KeyStore;
+use crate::mcp;
 
 /// Время жизни кэша публичного каталога: модели меняются редко,
 /// 10 минут достаточно, чтобы не ходить в сеть при каждом открытии студии.
 const CATALOG_TTL: Duration = Duration::from_secs(600);
+
+pub(crate) struct GenerationGuard {
+    _process: File,
+    _local: tokio::sync::OwnedRwLockReadGuard<()>,
+}
 
 /// Состояние приложения для команд и джобов.
 ///
@@ -42,7 +49,8 @@ pub struct AppState {
     /// Эмиттер событий: в Tauri — события окна, в тестах — коллектор.
     emit: Arc<dyn Fn(AppEvent) + Send + Sync>,
     /// Генерации могут идти одновременно; восстановление ждёт их завершения.
-    recovery_lock: RwLock<()>,
+    recovery_lock: Arc<RwLock<()>>,
+    pub(crate) mcp: mcp::Service,
     /// Порядок записей SQLite и применения темы к окну должен совпадать.
     pub(crate) settings_write: Mutex<()>,
     /// Устаревший ответ кошелька нельзя принимать даже после перехода CI → OR → CI.
@@ -70,7 +78,8 @@ impl AppState {
             openrouter: OpenRouterKeyClient::default(),
             db_path: db_path.to_owned(),
             emit,
-            recovery_lock: RwLock::new(()),
+            recovery_lock: Arc::new(RwLock::new(())),
+            mcp: mcp::Service::load(db_path.with_file_name("mcp.json")),
             settings_write: Mutex::new(()),
             balance_epochs: Default::default(),
         })
@@ -93,6 +102,29 @@ impl AppState {
     pub fn jobs(&self, client: CiClient, folder: PathBuf) -> Result<Jobs, String> {
         let storage = Storage::open(&self.db_path).map_err(|e| e.to_string())?;
         Ok(Jobs::new(client, storage, folder, Arc::clone(&self.emit)))
+    }
+
+    pub(crate) fn jobs_for(
+        &self,
+        provider: Provider,
+        key: String,
+        folder: PathBuf,
+    ) -> Result<Jobs, String> {
+        // Сохраняем приоритетно канонические пути, которые принимает предпросмотр.
+        let folder = dunce::canonicalize(&folder).unwrap_or(folder);
+        match provider {
+            Provider::CheaperInference => self.jobs(self.client(&key), folder),
+            Provider::OpenRouter => {
+                let storage = Storage::open(&self.db_path).map_err(|err| err.to_string())?;
+                Ok(Jobs::openrouter(
+                    self.openrouter.clone(),
+                    key,
+                    storage,
+                    folder,
+                    Arc::clone(&self.emit),
+                ))
+            }
+        }
     }
 
     /// Кэш публичного каталога моделей.
@@ -133,6 +165,45 @@ impl AppState {
         &self.recovery_lock
     }
 
+    pub(crate) async fn hold_generation(&self) -> Result<GenerationGuard, String> {
+        let local = Arc::clone(&self.recovery_lock).read_owned().await;
+        let file = self.open_history_lock()?;
+        loop {
+            match file.try_lock_shared() {
+                Ok(()) => {
+                    return Ok(GenerationGuard {
+                        _local: local,
+                        _process: file,
+                    });
+                }
+                Err(TryLockError::WouldBlock) => {
+                    tokio::time::sleep(Duration::from_millis(50)).await
+                }
+                Err(TryLockError::Error(err)) => return Err(history_lock_error(err)),
+            }
+        }
+    }
+
+    /// Другой процесс может продолжать генерацию в общей истории.
+    pub(crate) fn try_hold_recovery(&self) -> Result<Option<File>, String> {
+        let file = self.open_history_lock()?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(file)),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Error(err)) => Err(history_lock_error(err)),
+        }
+    }
+
+    fn open_history_lock(&self) -> Result<File, String> {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.db_path.with_extension("lock"))
+            .map_err(history_lock_error)
+    }
+
     /// Системный диалог Keychain может ждать пользователя; не занимаем поток async-рантайма.
     pub(crate) async fn has_key(&self, provider: Provider) -> Result<bool, String> {
         let store = self.key_store.clone();
@@ -164,6 +235,37 @@ impl AppState {
     /// Шлёт событие ядра через эмиттер (Tauri-события или коллектор тестов).
     pub fn emit(&self, event: AppEvent) {
         (self.emit)(event);
+    }
+}
+
+fn history_lock_error(err: std::io::Error) -> String {
+    format!("Не удалось заблокировать историю студии: {err}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keychain::InMemoryKeyStore;
+
+    #[tokio::test]
+    async fn history_recovery_respects_a_generation_from_another_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("history.db");
+        let state = || {
+            AppState::new(
+                &db,
+                Box::new(InMemoryKeyStore::default()),
+                "http://127.0.0.1:1",
+                Arc::new(|_| {}),
+            )
+            .unwrap()
+        };
+        let gui = state();
+        let cli = state();
+        let running = cli.hold_generation().await.unwrap();
+        assert!(gui.try_hold_recovery().unwrap().is_none());
+        drop(running);
+        assert!(gui.try_hold_recovery().unwrap().is_some());
     }
 }
 

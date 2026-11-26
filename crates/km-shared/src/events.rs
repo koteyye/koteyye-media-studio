@@ -103,6 +103,58 @@ pub enum Lang {
     En,
 }
 
+impl Lang {
+    /// Студия поддерживает ru и en. Другие локали используют английский.
+    pub fn from_locale(locale: &str) -> Self {
+        let primary = locale.trim().split(['-', '_', '.', '@']).next();
+        if primary.is_some_and(|language| language.eq_ignore_ascii_case("ru")) {
+            Self::Ru
+        } else {
+            Self::En
+        }
+    }
+
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Ru => "ru",
+            Self::En => "en",
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn detect_system() -> Option<Self> {
+        sys_locale::get_locale().as_deref().map(Self::from_locale)
+    }
+}
+
+/// Сохранённый выбор языка. Системный язык вычисляется при запуске.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LangPreference {
+    #[default]
+    System,
+    Ru,
+    En,
+}
+
+impl LangPreference {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Ru => Lang::Ru.code(),
+            Self::En => Lang::En.code(),
+        }
+    }
+
+    pub const fn resolve(self, system: Lang) -> Lang {
+        match self {
+            Self::System => system,
+            Self::Ru => Lang::Ru,
+            Self::En => Lang::En,
+        }
+    }
+}
+
 /// Тема оформления.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -132,9 +184,16 @@ impl Provider {
             Self::OpenRouter => "OpenRouter",
         }
     }
+
+    pub const fn api_keys_url(self) -> &'static str {
+        match self {
+            Self::CheaperInference => "https://www.cheaperinference.com/dashboard/keys",
+            Self::OpenRouter => "https://openrouter.ai/settings/keys",
+        }
+    }
 }
 
-/// Небольшие параметры, которые переносятся между запусками для одного режима CI.
+/// Небольшие параметры, которые переносятся между запусками для одного режима.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ModelChoice {
@@ -160,6 +219,8 @@ pub struct WorkspacePrefs {
     pub startup: Option<MediaKind>,
     pub last_kind: MediaKind,
     pub model_choices: HashMap<GenMode, ModelChoice>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub openrouter_model_choices: HashMap<GenMode, ModelChoice>,
 }
 
 impl Default for WorkspacePrefs {
@@ -174,6 +235,7 @@ impl Default for WorkspacePrefs {
             startup: None,
             last_kind: MediaKind::Image,
             model_choices: HashMap::new(),
+            openrouter_model_choices: HashMap::new(),
         }
     }
 }
@@ -184,7 +246,8 @@ pub struct Settings {
     /// Папка для сохранения медиа.
     pub local_folder: String,
     /// Язык интерфейса.
-    pub lang: Lang,
+    #[serde(default)]
+    pub lang: LangPreference,
     /// Тема оформления.
     pub theme: Theme,
     /// Показывать реальный баланс CI (иначе только локальные траты).
@@ -199,7 +262,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             local_folder: String::new(),
-            lang: Lang::Ru,
+            lang: LangPreference::System,
             theme: Theme::Light,
             show_real_balance: false,
             provider: Provider::default(),

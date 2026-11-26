@@ -1,4 +1,4 @@
-//! Типы каталога моделей Cheaper Inference (`GET /public/models`).
+//! Общие типы каталогов моделей Cheaper Inference и OpenRouter.
 //!
 //! Клиенту нужны только поля для выбора модели и оценки стоимости генерации;
 //! неизвестные поля ответа игнорируются, отсутствующие опциональные поля
@@ -43,6 +43,29 @@ pub struct CatalogPricingScope {
     pub scope: Option<CatalogPriceSelector>,
     #[serde(default)]
     pub tiers: Vec<CatalogTier>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct CatalogParameter {
+    pub values: Vec<String>,
+    pub min: Option<String>,
+    pub max: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct OpenRouterModelOptions {
+    pub modes: Vec<GenMode>,
+    pub image_parameters: BTreeMap<String, CatalogParameter>,
+    pub video_durations: Vec<u32>,
+    pub video_resolutions: Vec<String>,
+    pub video_aspect_ratios: Vec<String>,
+    pub video_sizes: Vec<String>,
+    pub video_generate_audio: Option<bool>,
+    pub video_can_toggle_audio: bool,
+    pub video_seed: bool,
+    pub tts_parameters: BTreeMap<String, CatalogParameter>,
 }
 
 /// Тип модели в каталоге CI; неизвестные типы сохраняются в [`ModelType::Unknown`].
@@ -164,6 +187,8 @@ pub struct CatalogModel {
     /// Альтернативные идентификаторы модели.
     #[serde(default)]
     pub aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openrouter: Option<OpenRouterModelOptions>,
 }
 
 impl CatalogModel {
@@ -178,6 +203,9 @@ impl CatalogModel {
 
     /// Единый фильтр каталога для WASM-интерфейса и нативного ядра.
     pub fn supports_mode(&self, mode: GenMode) -> bool {
+        if let Some(options) = &self.openrouter {
+            return options.modes.contains(&mode);
+        }
         match mode {
             GenMode::TextToImage => {
                 self.model_type == ModelType::Image && self.supports("/v1/images/generations")

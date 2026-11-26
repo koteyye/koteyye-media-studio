@@ -140,6 +140,13 @@ body {
 
 .error-banner-text {
   flex: 1;
+  min-width: 0;
+}
+
+.localized-error pre {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* Кнопка ручного закрытия баннера ошибки (сигнал error → None). */

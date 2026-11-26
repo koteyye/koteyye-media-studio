@@ -38,6 +38,7 @@ fn balance_hint(provider: Provider, reason: Option<BalanceUnavailable>) -> &'sta
 pub(super) fn StorageSettings() -> Element {
     let state = use_context::<AppState>();
     let lang = (state.lang)();
+    let pick = tr(lang, "settings.pick_folder");
     let mut picking = use_signal(|| false);
     let folder = state.settings.read().local_folder.clone();
     rsx! {
@@ -68,7 +69,7 @@ pub(super) fn StorageSettings() -> Element {
                         }
                         picking.set(true);
                         spawn(async move {
-                            match ipc::pick_folder().await {
+                            match ipc::pick_folder(pick).await {
                                 Ok(Some(path)) => {
                                     super::change_settings(state, move |s| s.local_folder = path)
                                 }
@@ -78,7 +79,7 @@ pub(super) fn StorageSettings() -> Element {
                             picking.set(false);
                         });
                     },
-                    {tr(lang, "settings.pick_folder")}
+                    {pick}
                 }
             }
         }

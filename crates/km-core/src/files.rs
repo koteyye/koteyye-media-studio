@@ -78,28 +78,29 @@ fn save_at(
     mut millis: u128,
 ) -> Result<PathBuf> {
     ensure_folder(folder)?;
-    let mut temp = NamedTempFile::new_in(folder)?;
-    temp.write_all(bytes)?;
+    let path_for = |millis| folder.join(file_name(kind, index, total, content_type, millis));
+    let initial_path = path_for(millis);
+    let mut temp = NamedTempFile::new_in(folder).map_err(|err| save_error(&initial_path, err))?;
+    temp.write_all(bytes)
+        .map_err(|err| save_error(&initial_path, err))?;
     loop {
-        let path = folder.join(file_name(kind, index, total, content_type, millis));
+        let path = path_for(millis);
         match temp.persist_noclobber(&path) {
             Ok(_) => return Ok(path),
             Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
                 temp = error.file;
                 millis += 1;
             }
-            Err(error) => {
-                return Err(CoreError::Io(io::Error::new(
-                    error.error.kind(),
-                    format!(
-                        "не удалось сохранить файл {}: {}",
-                        path.display(),
-                        error.error
-                    ),
-                )));
-            }
+            Err(error) => return Err(save_error(&path, error.error)),
         }
     }
+}
+
+fn save_error(path: &Path, error: io::Error) -> CoreError {
+    CoreError::Io(io::Error::new(
+        error.kind(),
+        format!("не удалось сохранить файл {}: {error}", path.display()),
+    ))
 }
 
 /// Расширение файла по content-type; неизвестный тип даёт `bin`.

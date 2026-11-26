@@ -4,8 +4,8 @@
 
 use km_core::{CoreError, Storage};
 use km_shared::{
-    GenMode, HistoryFilter, HistoryPatch, HistoryRecord, JobStatus, Lang, MediaKind, Provider,
-    Settings, Theme,
+    GenMode, HistoryFilter, HistoryPatch, HistoryRecord, JobStatus, LangPreference, MediaKind,
+    Provider, Settings, Theme,
 };
 use tempfile::TempDir;
 
@@ -468,7 +468,7 @@ fn settings_round_trip_and_overwrite() {
     let storage = Storage::open_in_memory().expect("in-memory БД должна открыться");
     let first = Settings {
         local_folder: "/media".to_owned(),
-        lang: Lang::En,
+        lang: LangPreference::En,
         theme: Theme::Dark,
         show_real_balance: true,
         ..Settings::default()
@@ -478,7 +478,7 @@ fn settings_round_trip_and_overwrite() {
 
     let second = Settings {
         local_folder: String::new(),
-        lang: Lang::Ru,
+        lang: LangPreference::Ru,
         theme: Theme::Light,
         show_real_balance: false,
         ..Settings::default()
@@ -495,7 +495,7 @@ fn settings_round_trip_and_overwrite() {
 fn settings_default_when_empty() {
     let storage = Storage::open_in_memory().expect("in-memory БД должна открыться");
     let got = storage.get_settings().expect("дефолтные настройки");
-    assert_eq!(got.lang, Lang::Ru, "язык по умолчанию Ru");
+    assert_eq!(got.lang, LangPreference::System, "язык ОС по умолчанию");
     assert_eq!(
         got.theme,
         Theme::Light,
@@ -519,7 +519,7 @@ fn open_persists_history_and_settings_across_reopen() {
     );
     let settings = Settings {
         local_folder: "/saved".to_owned(),
-        lang: Lang::En,
+        lang: LangPreference::En,
         theme: Theme::Dark,
         show_real_balance: true,
         ..Settings::default()
@@ -590,7 +590,7 @@ fn upgrades_an_existing_database_without_changing_jobs_or_preferences() {
         let got = s.get_settings().unwrap();
         assert_eq!(got.local_folder, "C:/legacy");
         assert_eq!(got.theme, Theme::Dark);
-        assert_eq!(got.lang, Lang::En);
+        assert_eq!(got.lang, LangPreference::En);
         assert!(got.show_real_balance);
         assert_eq!(got.provider, Provider::CheaperInference);
     }

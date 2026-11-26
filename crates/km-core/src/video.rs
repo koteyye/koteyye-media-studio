@@ -7,6 +7,8 @@
 //! Валидация выполняется до HTTP-запроса; опциональные параметры
 //! не отправляются, если не заданы.
 
+use std::time::Duration;
+
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use km_shared::video::VideoLimits;
 use km_shared::{Billing, GenMode, Generation, GenerationRequest, VideoItem, VideoResponse};
@@ -190,7 +192,11 @@ pub(crate) fn safe_request_segment(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
 }
 
-pub(crate) async fn video_bytes(item: &VideoItem, client: &CiClient) -> Result<Vec<u8>, CoreError> {
+pub(crate) async fn video_bytes(
+    item: &VideoItem,
+    client: &CiClient,
+    timeout: Duration,
+) -> Result<Vec<u8>, CoreError> {
     if let Some(encoded) = &item.b64_video
         && let Ok(bytes) = STANDARD.decode(encoded)
         && !bytes.is_empty()
@@ -198,7 +204,7 @@ pub(crate) async fn video_bytes(item: &VideoItem, client: &CiClient) -> Result<V
         return Ok(bytes);
     }
     if let Some(url) = item.url.as_deref().filter(|url| !url.trim().is_empty()) {
-        let bytes = client.download(url).await?;
+        let bytes = client.download_with_timeout(url, Some(timeout)).await?;
         if !bytes.is_empty() {
             return Ok(bytes);
         }

@@ -9,3 +9,4 @@ pub use history::History;
 pub use onboarding::Onboarding;
 pub use settings::Settings;
 pub use studio::Studio;
+pub(crate) use studio::uploads;

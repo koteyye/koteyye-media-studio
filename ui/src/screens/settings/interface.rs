@@ -4,7 +4,7 @@ use super::{
     application::{StorageSettings, UpdateSettings},
     change_settings, kind_id,
 };
-use crate::state::{AppState, lang_name, parse_lang, theme_name};
+use crate::state::{AppState, parse_lang_preference, theme_name};
 use dioxus::prelude::*;
 use km_shared::{Lang, MediaKind, Settings, Theme, WorkspacePrefs};
 use km_ui_core::i18n::tr;
@@ -160,6 +160,7 @@ fn reset_interface(s: &mut Settings) {
     s.workspace = WorkspacePrefs {
         last_kind: s.workspace.last_kind,
         model_choices: std::mem::take(&mut s.workspace.model_choices),
+        openrouter_model_choices: std::mem::take(&mut s.workspace.openrouter_model_choices),
         ..WorkspacePrefs::default()
     };
 }
@@ -209,9 +210,9 @@ pub(super) fn Interface() -> Element {
                     SelectRow {
                         name: "lang",
                         label: t("settings.language"),
-                        value: lang_name(lang),
-                        options: vec![("ru", "Русский"), ("en", "English")],
-                        on_select: move |v: String| change_settings(state, move |s| s.lang = parse_lang(&v)),
+                        value: settings.lang.code(),
+                        options: vec![("system", t("settings.language_system")), ("ru", "Русский"), ("en", "English")],
+                        on_select: move |v: String| change_settings(state, move |s| s.lang = parse_lang_preference(&v)),
                     }
                 }
             }
@@ -351,12 +352,12 @@ pub(super) fn Interface() -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use km_shared::Provider;
+    use km_shared::{LangPreference, Provider};
     #[test]
     fn view_reset_preserves_provider_storage_language_and_last_section() {
         let mut settings = Settings {
             local_folder: "/existing".into(),
-            lang: Lang::En,
+            lang: LangPreference::En,
             theme: Theme::Dark,
             show_real_balance: true,
             provider: Provider::OpenRouter,
@@ -371,7 +372,7 @@ mod tests {
         assert_eq!(settings.provider, Provider::OpenRouter);
         assert_eq!(settings.local_folder, "/existing");
         assert!(settings.show_real_balance);
-        assert_eq!(settings.lang, Lang::En);
+        assert_eq!(settings.lang, LangPreference::En);
         assert_eq!(settings.workspace.last_kind, MediaKind::Video);
         assert_eq!(settings.theme, Theme::Light);
         assert_eq!(settings.workspace.recent_count, 5);

@@ -1,31 +1,40 @@
-//! Черновики восьми режимов и выбранная вкладка каждого раздела Студии.
+//! Общие черновики изображений и видео и отдельные вкладки аудио.
 
 use dioxus::prelude::*;
 use km_shared::video::VideoLimits;
-use km_shared::{CatalogModel, GenMode, GenParams, GenerationRequest, MediaKind, Reference};
-use km_ui_core::studio::{build_request, default_params, models_for};
+use km_shared::{
+    CatalogModel, GenMode, GenParams, GenerationRequest, MediaKind, Provider, Reference,
+};
+use km_ui_core::studio::{build_request, default_params, mode_for_input, models_for_input};
 
-/// У каждого режима собственная форма на всё время работы приложения.
-/// Большие референсы остаются на месте при навигации.
+/// Поля формы и вложения сохраняются при навигации.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct StudioDraft {
+    pub provider: Provider,
     pub mode: GenMode,
     pub model: Signal<String>,
     pub prompt: Signal<String>,
     pub params: Signal<GenParams>,
     pub references: Signal<Vec<Reference>>,
     pub mask: Signal<Option<String>>,
+    /// Сохраняет тип единственного вложения при повторе запроса из истории.
+    pub reference_intent: Signal<Option<GenMode>>,
 }
 
 impl StudioDraft {
-    fn new(mode: GenMode) -> Self {
+    fn new(provider: Provider, mode: GenMode) -> Self {
         Self {
+            provider,
             mode,
             model: Signal::new(String::new()),
             prompt: Signal::new(String::new()),
-            params: Signal::new(default_params(mode)),
+            params: Signal::new(match provider {
+                Provider::CheaperInference => default_params(mode),
+                Provider::OpenRouter => GenParams::default(),
+            }),
             references: Signal::new(Vec::new()),
             mask: Signal::new(None),
+            reference_intent: Signal::new(None),
         }
     }
 
@@ -35,8 +44,38 @@ impl StudioDraft {
         if !self.model.peek().is_empty() {
             return;
         }
-        if let Some(first) = models_for(catalog, kind, self.mode).first() {
-            self.select_model(first.id.clone());
+        let count = self.references.peek().len();
+        let available = models_for_input(catalog, kind, self.mode, count);
+        if let Some(first) = available
+            .iter()
+            .find(|model| mode_for_input(kind, self.mode, model, count).is_some())
+            .copied()
+            .or_else(|| available.first().copied())
+        {
+            self.select_model_for_input(kind, first);
+        }
+    }
+
+    pub fn mode_for(self, kind: MediaKind, model: Option<&CatalogModel>) -> Option<GenMode> {
+        let model = model?;
+        let count = self.references.read().len();
+        if kind == MediaKind::Video
+            && count == 1
+            && *self.reference_intent.read() == Some(GenMode::ReferenceToVideo)
+            && model.supports_mode(GenMode::ReferenceToVideo)
+        {
+            return Some(GenMode::ReferenceToVideo);
+        }
+        mode_for_input(kind, self.mode, model, count)
+    }
+
+    pub fn select_model_for_input(self, kind: MediaKind, model: &CatalogModel) {
+        let changed = *self.model.peek() != model.id;
+        self.select_model(model.id.clone());
+        if changed
+            && let Some(mode) = mode_for_input(kind, self.mode, model, self.references.peek().len())
+        {
+            self.adapt_video_params(mode);
         }
     }
 
@@ -47,7 +86,9 @@ impl StudioDraft {
             return;
         }
         let replacing = !self.model.peek().is_empty();
-        if replacing {
+        if replacing && self.provider == Provider::OpenRouter {
+            self.params.set(GenParams::default());
+        } else if replacing {
             match self.mode {
                 GenMode::TextToVideo | GenMode::ImageToVideo | GenMode::ReferenceToVideo => {
                     let mut params = self.params.write();
@@ -58,29 +99,50 @@ impl StudioDraft {
                 _ => {}
             }
         }
-        if let Some(limits) = VideoLimits::for_model(&id, self.mode) {
+        if self.provider == Provider::CheaperInference
+            && let Some(limits) = VideoLimits::for_model(&id, self.mode)
+        {
             limits.apply_defaults(&mut self.params.write());
         }
+        self.reference_intent.set(None);
         self.model.set(id);
+    }
+
+    pub fn adapt_video_params(mut self, mode: GenMode) {
+        if self.provider == Provider::CheaperInference
+            && matches!(
+                mode,
+                GenMode::TextToVideo | GenMode::ImageToVideo | GenMode::ReferenceToVideo
+            )
+            && let Some(limits) = VideoLimits::for_model(&self.model.peek(), mode)
+        {
+            limits.apply_defaults(&mut self.params.write());
+        }
     }
 
     fn restore(mut self, req: GenerationRequest) {
         self.model.set(req.model);
         self.prompt.set(req.prompt);
         self.params.set(req.params);
+        self.reference_intent
+            .set((req.mode == GenMode::ReferenceToVideo).then_some(req.mode));
         self.references.set(req.references);
         self.mask.set(req.mask_data_url);
     }
 
-    pub fn request(self, kind: MediaKind) -> GenerationRequest {
+    pub fn request(self, kind: MediaKind, mode: GenMode) -> GenerationRequest {
         build_request(
             kind,
-            self.mode,
+            mode,
             &self.model.peek(),
             &self.prompt.peek(),
             self.params.peek().clone(),
             self.references.peek().clone(),
-            self.mask.peek().clone(),
+            if mode == GenMode::ImageEdit {
+                self.mask.peek().clone()
+            } else {
+                None
+            },
         )
     }
 }
@@ -95,10 +157,15 @@ pub(crate) struct StudioSection {
 }
 
 impl StudioSection {
-    pub(super) fn new(first: GenMode, other: &[GenMode]) -> Self {
-        let initial = StudioDraft::new(first);
+    pub(super) fn new(provider: Provider, first: GenMode, other: &[GenMode]) -> Self {
+        let initial = StudioDraft::new(provider, first);
         let drafts = std::iter::once(initial)
-            .chain(other.iter().copied().map(StudioDraft::new))
+            .chain(
+                other
+                    .iter()
+                    .copied()
+                    .map(|mode| StudioDraft::new(provider, mode)),
+            )
             .collect();
         Self {
             active: Signal::new(initial),
@@ -112,7 +179,12 @@ impl StudioSection {
             .drafts
             .read()
             .iter()
-            .find(|d| d.mode == req.mode)
+            .find(|d| {
+                d.mode == req.mode
+                    || (d.mode == GenMode::TextToImage && req.mode == GenMode::ImageEdit)
+                    || (d.mode == GenMode::TextToVideo
+                        && matches!(req.mode, GenMode::ImageToVideo | GenMode::ReferenceToVideo))
+            })
             .copied()
         else {
             return false;

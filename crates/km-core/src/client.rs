@@ -19,12 +19,15 @@ const DEFAULT_BASE: &str = "https://api.cheaperinference.com";
 /// Таймаут запроса по умолчанию.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Cheaper Inference может ждать медиа до 295 секунд перед ответом.
+const CI_IMAGE_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Таймаут синхронной видео-генерации: CI блокирует ответ до готовности
 /// видео и может считать до 10 минут.
 const VIDEO_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// Читает метаданные ключа и кредиты аккаунта OpenRouter без генерации.
-/// Отдельный транспорт не может использовать Bearer клиента Cheaper Inference.
+/// Клиент OpenRouter с отдельной авторизацией для каждого запроса.
+#[derive(Clone)]
 pub struct OpenRouterKeyClient {
     http: reqwest::Client,
     base: String,
@@ -52,13 +55,106 @@ impl OpenRouterKeyClient {
         Self::at(format!("http://127.0.0.1:{port}/api/v1"))
     }
 
-    async fn get(&self, path: &str, key: &str) -> Result<reqwest::Response, CoreError> {
-        self.http
+    pub(crate) async fn get(&self, path: &str, key: &str) -> Result<reqwest::Response, CoreError> {
+        self.get_with_timeout(path, key, DEFAULT_TIMEOUT).await
+    }
+
+    pub(crate) async fn get_with_timeout(
+        &self,
+        path: &str,
+        key: &str,
+        timeout: Duration,
+    ) -> Result<reqwest::Response, CoreError> {
+        let request = self
+            .http
             .get(format!("{}{path}", self.base))
+            .timeout(timeout);
+        let request = if key.is_empty() {
+            request
+        } else {
+            request.bearer_auth(key)
+        };
+        request.send().await.map_err(map_transport_error)
+    }
+
+    pub(crate) async fn post<B: Serialize>(
+        &self,
+        path: &str,
+        key: &str,
+        body: &B,
+    ) -> Result<reqwest::Response, CoreError> {
+        let timeout = if path == "/videos" {
+            DEFAULT_TIMEOUT
+        } else {
+            VIDEO_TIMEOUT
+        };
+        let response = self
+            .http
+            .post(format!("{}{path}", self.base))
+            .timeout(timeout)
             .bearer_auth(key)
+            .header("X-OpenRouter-Title", "Koteyye Media Studio")
+            .json(body)
             .send()
             .await
-            .map_err(map_transport_error)
+            .map_err(map_transport_error)?;
+        self.check_status(response, key).await
+    }
+
+    pub(crate) async fn check_status(
+        &self,
+        response: reqwest::Response,
+        key: &str,
+    ) -> Result<reqwest::Response, CoreError> {
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response);
+        }
+        let body = response.json::<Value>().await.ok();
+        let error = body.as_ref().and_then(|body| body.get("error"));
+        let message = error
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .or_else(|| body.as_ref()?.get("message")?.as_str())
+            .unwrap_or("запрос к OpenRouter завершился ошибкой");
+        let code = error.and_then(|error| error.get("code")).and_then(|code| {
+            code.as_str()
+                .map(str::to_owned)
+                .or_else(|| code.as_i64().map(|n| n.to_string()))
+        });
+        let redact = |message: &str| {
+            if key.is_empty() {
+                message.to_owned()
+            } else {
+                message.replace(key, "[скрыто]")
+            }
+        };
+        Err(CoreError::Http {
+            status: status.as_u16(),
+            code: code.as_deref().map(redact),
+            message: redact(message),
+        })
+    }
+
+    pub(crate) async fn json<T: DeserializeOwned>(
+        &self,
+        response: reqwest::Response,
+        key: &str,
+    ) -> Result<T, CoreError> {
+        let bytes = self
+            .check_status(response, key)
+            .await?
+            .bytes()
+            .await
+            .map_err(map_transport_error)?;
+        serde_json::from_slice(&bytes).map_err(|e| {
+            let message = e.to_string();
+            CoreError::Serde(if key.is_empty() {
+                message
+            } else {
+                message.replace(key, "[скрыто]")
+            })
+        })
     }
 
     pub async fn verify(&self, key: &str) -> Result<bool, CoreError> {
@@ -163,14 +259,14 @@ fn record_balance_error(view: &mut BalanceView, error: CoreError, key: &str) {
 
 /// Асинхронный HTTP-клиент Cheaper Inference.
 ///
-/// Оборачивает [`reqwest::Client`] с таймаутом 60 секунд и подставляет
-/// заголовок `Authorization: Bearer <ключ>` в каждый запрос. Видео-запросы
-/// идут через отдельный клиент с таймаутом 600 секунд.
+/// Обычные запросы ограничены 60 секундами. Для генерации изображений
+/// отведено 300 секунд, для видео — 600.
 /// Дёшево клонируется: внутренние клиенты reqwest разделяются через `Arc`.
 #[derive(Clone)]
 pub struct CiClient {
     http: reqwest::Client,
     video_http: reqwest::Client,
+    image_timeout: Duration,
     base: String,
     key: String,
 }
@@ -199,6 +295,7 @@ impl CiClient {
         CiClient {
             http: build_http(DEFAULT_TIMEOUT),
             video_http: build_http(VIDEO_TIMEOUT),
+            image_timeout: CI_IMAGE_TIMEOUT,
             base: base.trim_end_matches('/').to_owned(),
             key: key.to_owned(),
         }
@@ -206,9 +303,7 @@ impl CiClient {
 
     /// Задаёт таймаут всех запросов клиента, включая видео-генерацию.
     ///
-    /// По умолчанию обычные запросы ограничены 60 секундами, видео —
-    /// 600; явное значение переопределяет оба. Нужен тестам, чтобы
-    /// проверить живой таймаут на короткой задержке.
+    /// Нужен тестам, чтобы проверить живой таймаут на короткой задержке.
     ///
     /// # Panics
     ///
@@ -217,6 +312,7 @@ impl CiClient {
     pub fn with_timeout(mut self, timeout: Duration) -> CiClient {
         self.http = build_http(timeout);
         self.video_http = build_http(timeout);
+        self.image_timeout = timeout;
         self
     }
 
@@ -314,9 +410,8 @@ impl CiClient {
         path: &str,
         json: Vec<u8>,
     ) -> Result<(T, HeaderMap), CoreError> {
-        let mut request = http
-            .post(self.url(path))
-            .bearer_auth(&self.key)
+        let mut request = self
+            .post_request(http, path)
             .header(reqwest::header::CONTENT_TYPE, "application/json");
         let json = if json.len() > km_shared::MAX_REQUEST_WIRE_BYTES
             && matches!(path, "/v1/videos/generations" | "/v1/images/generations")
@@ -334,6 +429,14 @@ impl CiClient {
         Self::decode_post(response, path).await
     }
 
+    fn post_request(&self, http: &reqwest::Client, path: &str) -> reqwest::RequestBuilder {
+        let request = http.post(self.url(path)).bearer_auth(&self.key);
+        match path.trim_start_matches('/') {
+            "v1/images/generations" | "v1/images/edits" => request.timeout(self.image_timeout),
+            _ => request,
+        }
+    }
+
     /// Multipart для изображений: источники и маска передаются байтами. Заголовок
     /// Content-Length включает также границы формы и все текстовые поля.
     pub(crate) async fn post_multipart_json_with_headers<T: DeserializeOwned>(
@@ -342,9 +445,7 @@ impl CiClient {
         form: reqwest::multipart::Form,
     ) -> Result<(T, HeaderMap), CoreError> {
         let req = self
-            .http
-            .post(self.url(path))
-            .bearer_auth(&self.key)
+            .post_request(&self.http, path)
             .multipart(form)
             .build()
             .map_err(map_transport_error)?;
@@ -424,12 +525,20 @@ impl CiClient {
     /// [`CoreError::Http`] при неуспешном статусе, [`CoreError::Timeout`] /
     /// [`CoreError::Network`] при сбое транспорта.
     pub async fn download(&self, url: &str) -> Result<Vec<u8>, CoreError> {
-        let response = self
-            .http
-            .get(url)
-            .send()
-            .await
-            .map_err(map_transport_error)?;
+        self.download_with_timeout(url, None).await
+    }
+
+    pub(crate) async fn download_with_timeout(
+        &self,
+        url: &str,
+        timeout: Option<Duration>,
+    ) -> Result<Vec<u8>, CoreError> {
+        let request = self.http.get(url);
+        let request = match timeout {
+            Some(timeout) => request.timeout(timeout),
+            None => request,
+        };
+        let response = request.send().await.map_err(map_transport_error)?;
         let status = response.status();
         if !status.is_success() {
             return Err(http_error(status, url, response).await);
@@ -701,7 +810,7 @@ fn is_account_path(path: &str) -> bool {
 ///
 /// URL в сообщении очищается от query и fragment: signed URL несут токены
 /// доступа в query-параметрах, которые не должны попадать в текст ошибки.
-fn map_transport_error(err: reqwest::Error) -> CoreError {
+pub(crate) fn map_transport_error(err: reqwest::Error) -> CoreError {
     if err.is_timeout() {
         return CoreError::Timeout;
     }
@@ -730,6 +839,16 @@ mod tests {
         let client = CiClient::with_base("k", "http://localhost:8080/");
         assert_eq!(client.url("/v1/models"), "http://localhost:8080/v1/models");
         assert_eq!(client.url("v1/models"), "http://localhost:8080/v1/models");
+    }
+
+    #[test]
+    fn ci_image_posts_wait_through_the_gateway_deadline() {
+        let client = CiClient::with_base("k", "http://localhost:8080");
+        let request = |path| client.post_request(&client.http, path).build().unwrap();
+        for path in ["/v1/images/generations", "/v1/images/edits"] {
+            assert_eq!(request(path).timeout(), Some(&Duration::from_secs(300)));
+        }
+        assert!(request("/v1/audio/speech").timeout().is_none());
     }
 
     #[test]

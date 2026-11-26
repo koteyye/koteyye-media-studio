@@ -12,8 +12,7 @@ use std::sync::Mutex;
 use keyring::Entry;
 use km_shared::Provider;
 
-/// Имя сервиса записи keychain (идентификатор приложения).
-const SERVICE: &str = "ru.koteyye.media-studio";
+use crate::APP_IDENTIFIER;
 
 const CI_USER: &str = "ci-api-key";
 const OPENROUTER_USER: &str = "openrouter-api-key";
@@ -75,7 +74,7 @@ impl KeychainStore {
     /// Строка с причиной, если запись keychain не создаётся.
     pub fn new() -> Result<KeychainStore, String> {
         let entry = |user| {
-            Entry::new(SERVICE, user)
+            Entry::new(APP_IDENTIFIER, user)
                 .map_err(|e| format!("не удалось открыть запись keychain: {e}"))
         };
         Ok(Self {

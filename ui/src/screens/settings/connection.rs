@@ -317,18 +317,7 @@ pub(super) fn Connections() -> Element {
 
                                     {p.name()}
                                 }
-                                small {
-
-                                    {
-                                        tr(
-                                            lang,
-                                            match p {
-                                                Provider::CheaperInference => "ws.ci_service",
-                                                Provider::OpenRouter => "ws.or_service",
-                                            },
-                                        )
-                                    }
-                                }
+                                small { {tr(lang, "ws.media_service")} }
                             }
                         }
                     }
@@ -373,6 +362,10 @@ fn Credentials(provider: Provider, lang: Lang) -> Element {
     let checking = e.notice == Notice::Checking;
     let blank = e.draft.trim().is_empty();
     let t = |key| tr(lang, key);
+    let key_instructions = t(match provider {
+        Provider::CheaperInference => "ws.key_setup_ci",
+        Provider::OpenRouter => "ws.key_setup_openrouter",
+    });
     rsx! {
         section {
             class: "sw-key",
@@ -393,6 +386,25 @@ fn Credentials(provider: Provider, lang: Lang) -> Element {
                 id: "studio-key-hint",
                 {t("ws.key_hint")}
             }
+            p {
+                class: "sw-note",
+                id: "studio-key-setup",
+                {key_instructions}
+                " "
+                a {
+                    class: "sw-link",
+                    href: provider.api_keys_url(),
+                    onclick: move |event| {
+                        event.prevent_default();
+                        spawn_local(async move {
+                            if let Err(error) = ipc::open_provider_api_keys(provider).await {
+                                state.set_error(Some(error));
+                            }
+                        });
+                    },
+                    {t("ws.open_api_keys")}
+                }
+            }
             div {
                 class: "sw-secret",
                 input {
@@ -402,7 +414,7 @@ fn Credentials(provider: Provider, lang: Lang) -> Element {
                     autocomplete: "off",
                     autocapitalize: "none",
                     spellcheck: "false",
-                    aria_describedby: "studio-key-hint",
+                    aria_describedby: "studio-key-hint studio-key-setup",
                     placeholder: t("ws.key_placeholder"),
                     value: e.draft.as_str(),
                     disabled: now.writing,

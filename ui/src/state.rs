@@ -14,7 +14,7 @@ use dioxus::prelude::*;
 use futures_channel::oneshot;
 use km_shared::{
     AppEvent, BalanceView, CatalogModel, GenMode, GenerationRequest, HistoryFilter, HistoryRecord,
-    Lang, MediaKind, ModelChoice, Provider, Settings, Theme,
+    Lang, LangPreference, MediaKind, ModelChoice, Provider, Settings, Theme,
 };
 use km_ui_core::i18n::tr;
 use km_ui_core::studio::build_request;
@@ -56,6 +56,8 @@ pub struct AppState {
     pub settings: Signal<Settings>,
     /// Применённый язык интерфейса (ru/en), меняется без перезапуска.
     pub lang: Signal<Lang>,
+    /// Язык ОС, с английским для неподдерживаемых локалей.
+    system_lang: Signal<Lang>,
     /// Выбранная тема; [`Theme::System`] резолвится через `system_dark`.
     pub theme: Signal<Theme>,
     /// Системная тема по `matchMedia`: `true` — тёмная.
@@ -73,16 +75,16 @@ pub struct AppState {
     /// Ошибка фоновой загрузки настроек, каталога, истории или баланса.
     pub background_error: Signal<Option<String>>,
     /// Вызовы generate в полёте. Разные виды медиа работают независимо.
-    pub(crate) generating: Signal<HashMap<MediaKind, GenMode>>,
+    pub(crate) generating: Signal<HashMap<(Provider, MediaKind), GenMode>>,
     /// Ручная проверка Pending работает отдельно от активных generate.
     pub(crate) recovering: Signal<bool>,
     pub(crate) update: Signal<UpdatePhase>,
-    studio: [StudioSection; 3],
+    studio: [[StudioSection; 3]; 2],
     selected_records: Signal<HashMap<(Provider, MediaKind), String>>,
     pub(crate) history_filter: Signal<HistoryFilter>,
     pub(crate) history_focus: Signal<bool>,
     pub(crate) settings_ready: Signal<bool>,
-    observed_choices: Signal<Option<HashMap<GenMode, ModelChoice>>>,
+    observed_choices: Signal<Option<[HashMap<GenMode, ModelChoice>; 2]>>,
     write_tail: CopyValue<Option<oneshot::Receiver<()>>>,
     provider_changes: Signal<usize>,
     committed_provider: Signal<Provider>,
@@ -113,12 +115,14 @@ impl AppState {
     /// Создаёт состояние с дефолтами до загрузки настроек.
     ///
     /// Дефолты зеркалят `default_settings` ядра (km-core/storage):
-    /// пустая папка, ru, System, реальный баланс выключен.
+    /// пустая папка, язык ОС, светлая тема, реальный баланс выключен.
     #[must_use]
     pub fn new() -> Self {
+        let system_lang = browser_system_language();
         Self {
             settings: Signal::new(Settings::default()),
-            lang: Signal::new(Lang::Ru),
+            lang: Signal::new(system_lang),
+            system_lang: Signal::new(system_lang),
             theme: Signal::new(Theme::Light),
             selected_records: Signal::new(HashMap::new()),
             history_filter: Signal::new(HistoryFilter::default()),
@@ -138,14 +142,17 @@ impl AppState {
             generating: Signal::new(HashMap::new()),
             recovering: Signal::new(false),
             update: Signal::new(UpdatePhase::Idle),
-            studio: [
-                StudioSection::new(GenMode::TextToImage, &[GenMode::ImageEdit]),
-                StudioSection::new(
-                    GenMode::TextToVideo,
-                    &[GenMode::ImageToVideo, GenMode::ReferenceToVideo],
-                ),
-                StudioSection::new(GenMode::Speech, &[GenMode::Music, GenMode::SoundEffects]),
-            ],
+            studio: [Provider::CheaperInference, Provider::OpenRouter].map(|provider| {
+                [
+                    StudioSection::new(provider, GenMode::TextToImage, &[]),
+                    StudioSection::new(provider, GenMode::TextToVideo, &[]),
+                    StudioSection::new(
+                        provider,
+                        GenMode::Speech,
+                        &[GenMode::Music, GenMode::SoundEffects],
+                    ),
+                ]
+            }),
             history_revision: Signal::new(0),
             credential_revision: Signal::new(0),
             balance_revision: Signal::new(0),
@@ -182,17 +189,20 @@ impl AppState {
     }
 
     pub(crate) fn studio(self, kind: MediaKind) -> StudioSection {
-        match kind {
-            MediaKind::Image => self.studio[0],
-            MediaKind::Video => self.studio[1],
-            MediaKind::Audio => self.studio[2],
-        }
+        self.studio_for(self.settings.peek().provider, kind)
+    }
+
+    pub(crate) fn studio_for(self, provider: Provider, kind: MediaKind) -> StudioSection {
+        self.studio[provider_index(provider)][match kind {
+            MediaKind::Image => 0,
+            MediaKind::Video => 1,
+            MediaKind::Audio => 2,
+        }]
     }
 
     /// Восстанавливает форму для редактирования. Отправка всегда явная.
     pub(crate) fn repeat_record(self, record: &HistoryRecord) -> Result<(), String> {
         if record.provider == self.settings.peek().provider
-            && record.provider == Provider::CheaperInference
             && let Some(request) = request_from_history(record)
             && self.studio(record.kind).restore(request)
         {
@@ -207,13 +217,11 @@ impl AppState {
     pub(crate) fn submit(mut self, req: GenerationRequest) {
         let kind = req.kind;
         let provider = self.settings.peek().provider;
-        if provider != Provider::CheaperInference
-            || self.media_locked()
-            || self.generating.peek().contains_key(&kind)
-        {
+        let key = (provider, kind);
+        if self.media_locked() || self.generating.peek().contains_key(&key) {
             return;
         }
-        self.generating.write().insert(kind, req.mode);
+        self.generating.write().insert(key, req.mode);
         self.select_result(kind, None);
         let mut submitted = self.studio(kind).last_submission;
         submitted.set(Some(Submission::start(
@@ -240,7 +248,7 @@ impl AppState {
                 _ => {}
             }
             self.refresh_history().await;
-            self.generating.write().remove(&kind);
+            self.generating.write().remove(&key);
         });
     }
 
@@ -280,7 +288,8 @@ impl AppState {
         } else if self.settings.peek().show_real_balance != settings.show_real_balance {
             self.invalidate_balance();
         }
-        self.lang.set(settings.lang);
+        self.lang
+            .set(settings.lang.resolve(*self.system_lang.peek()));
         self.theme.set(settings.theme);
         self.settings.set(settings);
     }
@@ -326,6 +335,7 @@ impl AppState {
     fn queue_settings(mut self, mut settings: Settings) -> oneshot::Receiver<Result<(), String>> {
         if !settings.workspace.remember_models {
             settings.workspace.model_choices.clear();
+            settings.workspace.openrouter_model_choices.clear();
         }
         let generation = self.next_generation();
         let previous = self.settings.peek().clone();
@@ -424,6 +434,10 @@ impl AppState {
     /// история, баланс, каталоги.
     async fn load(mut self) {
         self.busy.set(true);
+        if let Ok(Some(lang)) = ipc::system_language().await {
+            self.system_lang.set(lang);
+            self.lang.set(self.settings.peek().lang.resolve(lang));
+        }
         match ipc::get_settings().await {
             Ok(settings) => {
                 self.load_choices(&settings);
@@ -435,9 +449,10 @@ impl AppState {
         }
         // Проверка ключа первого запуска: Ok(false) — ключа нет/отклонён →
         // онбординг; Err — соединение не проверено, редирект не нужен.
-        if self.settings.peek().provider == Provider::CheaperInference {
+        {
+            let provider = self.settings.peek().provider;
             let revision = *self.credential_revision.peek();
-            let check = ipc::test_connection(None).await;
+            let check = ipc::check_provider_key(provider, None).await;
             if revision == *self.credential_revision.peek() {
                 if let Err(e) = &check {
                     self.background_error.set(Some(e.clone()));
@@ -481,12 +496,13 @@ impl AppState {
     }
 
     pub(crate) async fn refresh_models(mut self, kind: MediaKind) {
-        if self.settings.peek().provider != Provider::CheaperInference {
+        let provider = self.settings.peek().provider;
+        if provider != *self.committed_provider.peek() {
             return;
         }
 
         let revision = *self.credential_revision.peek();
-        let models = ipc::fetch_models(kind).await;
+        let models = ipc::fetch_models(provider, kind).await;
         if revision != *self.credential_revision.peek() {
             return;
         }
@@ -510,8 +526,8 @@ impl AppState {
         if revision == *self.history_revision.peek() {
             match result {
                 Ok(records) => {
-                    for kind in [MediaKind::Image, MediaKind::Video, MediaKind::Audio] {
-                        let mut submitted = self.studio(kind).last_submission;
+                    for section in self.studio.into_iter().flatten() {
+                        let mut submitted = section.last_submission;
                         let id = submitted
                             .peek()
                             .as_ref()
@@ -565,7 +581,7 @@ impl AppState {
         };
         for (name, value) in [
             ("data-theme", theme_name(resolved)),
-            ("lang", lang_name(lang)),
+            ("lang", lang.code()),
             (
                 "data-density",
                 if prefs.workspace.compact {
@@ -589,6 +605,13 @@ impl AppState {
                 );
             }
         }
+    }
+}
+
+const fn provider_index(provider: Provider) -> usize {
+    match provider {
+        Provider::CheaperInference => 0,
+        Provider::OpenRouter => 1,
     }
 }
 
@@ -687,21 +710,26 @@ pub fn parse_theme(raw: &str) -> Theme {
     }
 }
 
-/// Код языка для атрибута `lang` и select: `ru`/`en` (как serde).
-#[must_use]
-pub fn lang_name(lang: Lang) -> &'static str {
-    match lang {
-        Lang::Ru => "ru",
-        Lang::En => "en",
-    }
+#[cfg(target_arch = "wasm32")]
+fn browser_system_language() -> Lang {
+    web_sys::window()
+        .and_then(|window| window.navigator().language())
+        .as_deref()
+        .map_or(Lang::En, Lang::from_locale)
 }
 
-/// Разбирает код языка из select; неизвестное значение — [`Lang::Ru`].
+#[cfg(not(target_arch = "wasm32"))]
+fn browser_system_language() -> Lang {
+    Lang::En
+}
+
+/// Разбирает сохранённый режим языка из select.
 #[must_use]
-pub fn parse_lang(raw: &str) -> Lang {
+pub fn parse_lang_preference(raw: &str) -> LangPreference {
     match raw {
-        "en" => Lang::En,
-        _ => Lang::Ru,
+        "ru" => LangPreference::Ru,
+        "en" => LangPreference::En,
+        _ => LangPreference::System,
     }
 }
 
@@ -746,79 +774,38 @@ mod tests {
     }
 
     #[test]
-    fn mode_drafts_and_active_tabs_survive_navigation_and_history_repeat() {
+    fn image_attachments_share_the_prompt_model_and_parameters() {
         with_studio(|state| {
-            let mut images = state.studio(MediaKind::Image);
-            let mut text = *images.active.peek();
-            text.select_model("first-image".into());
-            text.prompt.set("Пейзаж".into());
-            text.params.write().size = Some("1536x1024".into());
-            let expected_text = text.request(MediaKind::Image);
-
-            let edit = build_request(
-                MediaKind::Image,
-                GenMode::ImageEdit,
-                "independent-edit",
-                "Осветлить фон",
-                GenParams {
-                    size: Some("1024x1536".into()),
-                    n: Some(2),
-                    ..Default::default()
-                },
-                vec![Reference {
-                    data_url: "data:image/png;base64,AQ==".into(),
-                }],
-                Some("data:image/png;base64,Ag==".into()),
-            );
+            let mut draft = *state.studio(MediaKind::Image).active.peek();
+            let model: CatalogModel = serde_json::from_value(serde_json::json!({
+                "id": "image", "model_type": "image", "supports_image_edit": true,
+                "supported_endpoints": ["/v1/images/generations", "/v1/images/edits"]
+            }))
+            .unwrap();
+            draft.select_model_for_input(MediaKind::Image, &model);
+            draft.prompt.set("Пейзаж".into());
+            draft.params.write().size = Some("1536x1024".into());
+            let mode = move || draft.mode_for(MediaKind::Image, Some(&model)).unwrap();
+            assert_eq!(mode(), GenMode::TextToImage);
+            draft.references.write().push(Reference {
+                data_url: "https://example.com/input.png".into(),
+            });
+            let edit = draft.request(MediaKind::Image, mode());
+            assert_eq!(edit.mode, GenMode::ImageEdit);
+            assert_eq!(edit.model, "image");
+            assert_eq!(edit.prompt, "Пейзаж");
+            assert_eq!(edit.params.size.as_deref(), Some("1536x1024"));
+            draft.references.write().clear();
+            assert_eq!(mode(), GenMode::TextToImage);
             state
                 .repeat_record(&edit_record(serde_json::to_string(&edit).unwrap()))
                 .unwrap();
-            let edited = *images.active.peek();
-            assert_eq!(edited.request(MediaKind::Image), edit);
-
-            let mut audio = state.studio(MediaKind::Audio);
-            let mut music = audio
-                .drafts
-                .read()
-                .iter()
-                .copied()
-                .find(|d| d.mode == GenMode::Music)
-                .unwrap();
-            audio.active.set(music);
-            music.prompt.set("Вальс".into());
-            images.active.set(text);
-            assert_eq!(
-                state
-                    .studio(MediaKind::Image)
-                    .active
-                    .peek()
-                    .request(MediaKind::Image),
-                expected_text
-            );
-            images.active.set(edited);
-            assert_eq!(
-                state
-                    .studio(MediaKind::Image)
-                    .active
-                    .peek()
-                    .request(MediaKind::Image),
-                edit
-            );
-            assert_eq!(
-                state
-                    .studio(MediaKind::Audio)
-                    .active
-                    .peek()
-                    .prompt
-                    .peek()
-                    .as_str(),
-                "Вальс"
-            );
+            assert_eq!(draft.request(MediaKind::Image, mode()), edit);
         });
     }
 
     #[test]
-    fn remembered_choices_restore_only_model_format_and_count() {
+    fn remembered_choices_restore_from_legacy_reference_modes() {
         with_studio(|state| {
             let mut settings = Settings::default();
             settings.workspace.model_choices.insert(
@@ -830,23 +817,31 @@ mod tests {
                     ..Default::default()
                 },
             );
+            settings.workspace.openrouter_model_choices.insert(
+                GenMode::ReferenceToVideo,
+                ModelChoice {
+                    model: "openrouter/saved-video".into(),
+                    resolution: Some("1080p".into()),
+                    ..Default::default()
+                },
+            );
             state.load_choices(&settings);
-            let image = state.studio(MediaKind::Image);
-            let draft = image
-                .drafts
-                .read()
-                .iter()
-                .copied()
-                .find(|d| d.mode == GenMode::ImageEdit)
-                .unwrap();
-            let req = draft.request(MediaKind::Image);
+            let draft = *state.studio(MediaKind::Image).active.peek();
+            let req = draft.request(MediaKind::Image, GenMode::TextToImage);
             assert_eq!(req.model, "saved-edit");
             assert_eq!(req.params.n, Some(2));
             assert_eq!(req.params.size.as_deref(), Some("1536x1024"));
             assert!(
                 req.prompt.is_empty() && req.references.is_empty() && req.mask_data_url.is_none()
             );
-            assert!(image.active.peek().model.peek().is_empty());
+            let openrouter = state.studio_for(Provider::OpenRouter, MediaKind::Video);
+            let req = openrouter
+                .active
+                .peek()
+                .request(MediaKind::Video, GenMode::TextToVideo);
+            assert_eq!(req.model, "openrouter/saved-video");
+            assert_eq!(req.params.resolution.as_deref(), Some("1080p"));
+            assert!(req.params.size.is_none() && req.params.n.is_none());
         });
     }
 
@@ -877,18 +872,12 @@ mod tests {
                 {"id":"another-r2v","model_type":"video","supported_endpoints":["/v1/videos/generations"]}
             ])).unwrap();
             let section = state.studio(MediaKind::Video);
-            let mut draft = section
-                .drafts
-                .read()
-                .iter()
-                .copied()
-                .find(|d| d.mode == GenMode::ReferenceToVideo)
-                .unwrap();
+            let mut draft = *section.active.peek();
             draft.choose_initial_model(MediaKind::Video, &[]);
             assert!(draft.model.peek().is_empty());
             draft.choose_initial_model(MediaKind::Video, &models);
             assert_eq!(draft.model.peek().as_str(), models[0].id);
-            assert_eq!(draft.params.peek().duration_seconds, Some(8.0));
+            assert_eq!(draft.params.peek().duration_seconds, Some(6.0));
 
             draft.params.write().duration_seconds = None;
             draft.choose_initial_model(MediaKind::Video, &[models[1].clone(), models[0].clone()]);
@@ -906,14 +895,21 @@ mod tests {
             );
             draft.select_model(models[1].id.clone());
             draft.select_model(models[0].id.clone());
-            assert_eq!(draft.params.peek().duration_seconds, Some(8.0));
+            assert_eq!(draft.params.peek().duration_seconds, Some(4.0));
 
-            let mut historical = draft.request(MediaKind::Video);
-            historical.params.duration_seconds = Some(6.0);
+            let mut historical = draft.request(MediaKind::Video, GenMode::ReferenceToVideo);
+            historical.params.duration_seconds = Some(8.0);
+            historical.references = vec![Reference {
+                data_url: "https://example.com/subject.png".into(),
+            }];
             assert!(section.restore(historical.clone()));
+            assert_eq!(
+                draft.mode_for(MediaKind::Video, Some(&models[0])),
+                Some(GenMode::ReferenceToVideo)
+            );
             draft.choose_initial_model(MediaKind::Video, &models);
             assert_eq!(
-                draft.request(MediaKind::Video),
+                draft.request(MediaKind::Video, GenMode::ReferenceToVideo),
                 historical,
                 "при повторе сохраняем параметры истории даже если нужна коррекция"
             );
@@ -976,16 +972,37 @@ mod tests {
     }
 
     #[test]
-    fn lang_names_roundtrip() {
-        for lang in [Lang::Ru, Lang::En] {
-            assert_eq!(parse_lang(lang_name(lang)), lang, "lang {lang:?}");
+    fn language_preferences_roundtrip() {
+        for lang in [
+            LangPreference::System,
+            LangPreference::Ru,
+            LangPreference::En,
+        ] {
+            assert_eq!(parse_lang_preference(lang.code()), lang, "lang {lang:?}");
         }
     }
 
     #[test]
-    fn parse_lang_unknown_falls_back_to_ru() {
-        assert_eq!(parse_lang(""), Lang::Ru);
-        assert_eq!(parse_lang("de"), Lang::Ru);
+    fn unknown_language_preference_follows_system() {
+        assert_eq!(parse_lang_preference(""), LangPreference::System);
+        assert_eq!(parse_lang_preference("de"), LangPreference::System);
+    }
+
+    #[test]
+    fn applies_explicit_and_system_languages_to_the_ui() {
+        with_studio(|mut state| {
+            state.system_lang.set(Lang::Ru);
+            state.apply_settings(Settings::default());
+            assert_eq!(*state.lang.peek(), Lang::Ru);
+            state.apply_settings(Settings {
+                lang: LangPreference::En,
+                ..Settings::default()
+            });
+            assert_eq!(*state.lang.peek(), Lang::En);
+            state.apply_settings(Settings::default());
+            assert_eq!(*state.lang.peek(), Lang::Ru);
+            assert_eq!(state.settings.peek().lang, LangPreference::System);
+        });
     }
 
     #[test]
@@ -1017,7 +1034,7 @@ mod tests {
     fn settings_with_theme(theme: Theme) -> Settings {
         Settings {
             local_folder: String::new(),
-            lang: Lang::Ru,
+            lang: LangPreference::Ru,
             theme,
             show_real_balance: false,
             ..Settings::default()

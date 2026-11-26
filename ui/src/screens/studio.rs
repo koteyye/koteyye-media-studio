@@ -1,41 +1,45 @@
-//! Рабочая область Студии: формы восьми режимов, результат и недавние работы.
+//! Рабочая область Студии: форма, результат и недавние работы.
 
 use dioxus::prelude::*;
 use dioxus::web::WebFileExt;
 use km_shared::video::VideoLimits;
-use km_shared::{GenMode, GenParams, JobStatus, Lang, MediaKind, Provider};
-use km_ui_core::i18n::tr;
+use km_shared::{GenMode, GenParams, JobStatus, Lang, MediaKind, OpenRouterModelOptions, Provider};
+use km_ui_core::i18n::{localize_error, tr};
 use km_ui_core::studio::{
-    PriceUnit, estimate_generation_price, format_price, models_for, starting_rate,
+    MAX_OPENROUTER_EDIT_SOURCES, PriceUnit, estimate_generation_price, format_price,
+    models_for_input, starting_rate,
 };
 use km_ui_core::studio_results::{self, StudioResult, Submission};
 
 use crate::components::{
-    chips::ParamChips,
+    chips::{OpenRouterChips, ParamChips},
+    error_notice::ErrorNotice,
     model_dropdown::ModelDropdown,
     player::{MediaSeries, display_date, display_timestamp},
     recent::RecentStrip,
-    upload::{FilePicker, is_file_drag, read_batch},
+    upload::{is_file_drag, read_batch},
 };
 use crate::router::{Route, parse_kind};
 use crate::state::{AppState, StudioDraft};
 
 #[path = "studio_uploads.rs"]
-mod uploads;
+pub(crate) mod uploads;
 use uploads::StudioUploads;
 
 /// Параметр маршрута выбирает вид медиа, черновики принадлежат AppState.
 #[component]
 pub fn Studio(kind: String) -> Element {
     let kind = parse_kind(&kind);
-    rsx! { for section_kind in [kind] { Workspace { key: "{section_kind:?}", kind:section_kind } } }
+    let state = use_context::<AppState>();
+    let provider = state.settings.read().provider;
+    rsx! { Workspace { key: "{provider:?}-{kind:?}", kind, provider } }
 }
 
 #[component]
-fn Workspace(kind: MediaKind) -> Element {
+fn Workspace(kind: MediaKind, provider: Provider) -> Element {
     let state = use_context::<AppState>();
     use_effect(move || state.visit_media(kind));
-    let mut section = state.studio(kind);
+    let mut section = state.studio_for(provider, kind);
     let draft = (section.active)();
     let lang = (state.lang)();
     let mode = draft.mode;
@@ -44,7 +48,6 @@ fn Workspace(kind: MediaKind) -> Element {
         MediaKind::Video => tr(lang, "studio.video"),
         MediaKind::Audio => tr(lang, "studio.audio"),
     };
-    let provider = state.settings.read().provider;
     let nav = use_navigator();
     let drafts = section.drafts.read();
     rsx! {
@@ -59,36 +62,24 @@ fn Workspace(kind: MediaKind) -> Element {
                     span {class:"studio-icon","data-icon":"search",aria_hidden:"true"} span { {tr(lang,"gen.find")} }
                 }
             }
-            if provider==Provider::CheaperInference {
-              div {class:"generator-composer",
-               div { class: "mode-tabs", role: "group", aria_label: title,
-                for tab in drafts.iter().copied() {
-                    button {
-                        key: "{tab.mode:?}", r#type: "button", class: "mode-tab",
-                        aria_pressed: "{mode == tab.mode}",
-                        onclick: move |_| section.active.set(tab),
-                        {tab_label(lang, tab.mode)}
+            div {class:"generator-composer",
+               if kind == MediaKind::Audio {
+                    div { class: "mode-tabs", role: "group", aria_label: title,
+                        for tab in drafts.iter().copied() {
+                            button {
+                                key: "{tab.mode:?}", r#type: "button", class: "mode-tab",
+                                aria_pressed: "{mode == tab.mode}",
+                                onclick: move |_| section.active.set(tab),
+                                {tab_label(lang, tab.mode)}
+                            }
+                        }
                     }
-                }
                }
                for active in [draft] {
                    StudioForm { key: "{active.mode:?}", kind,draft:active }
                }
-              }
-              StudioResults {kind, provider }
-            } else {
-                div { class:"generator-planned",
-                    h2 {{tr(lang,"gen.or_title")}} p {{tr(lang,"gen.or_note")}}
-                    button {class:"btn",r#type:"button",disabled:!state.media_idle(),
-                        onclick:move |_|{
-                            let mut settings=state.settings.peek().clone();
-                            settings.provider=Provider::CheaperInference;
-                            wasm_bindgen_futures::spawn_local(async move{let _=state.persist_settings(settings).await;});
-                        }, {tr(lang,"gen.select_ci")}
-                    }
-                    Link {to:Route::Settings{},class:"btn", {tr(lang,"gen.open_settings")} }
-                }
             }
+            StudioResults {kind, provider}
         }
     }
 }
@@ -131,55 +122,89 @@ fn StudioForm(kind: MediaKind, mut draft: StudioDraft) -> Element {
     let mut reloading = use_signal(|| false);
     let mut dropping = use_signal(|| false);
     let mut dragging = use_signal(|| false);
-    let mode = draft.mode;
+    let provider = draft.provider;
     // И смена черновика, и асинхронная загрузка каталога могут первыми сделать модель доступной.
     use_effect(use_reactive((&kind, &draft), move |(kind, draft)| {
-        if let Some(models) = state.models_by_kind.read().get(&kind) {
+        if state.settings.read().provider == draft.provider
+            && let Some(models) = state.models_by_kind.read().get(&kind)
+        {
             draft.choose_initial_model(kind, models);
         }
     }));
     let requested = (draft.model)();
     let prompt = draft.prompt.read();
-    let params = (draft.params)();
+    let mut params = (draft.params)();
+    let reference_count = draft.references.read().len();
     let catalogs = state.models_by_kind.read();
-    let compatible = models_for(
-        catalogs.get(&kind).map(Vec::as_slice).unwrap_or_default(),
-        kind,
-        mode,
-    );
+    let catalog = catalogs.get(&kind).map(Vec::as_slice).unwrap_or_default();
+    let compatible = models_for_input(catalog, kind, draft.mode, reference_count);
     // Первый доступный вариант удобен для новой формы. При повторе нельзя
     // незаметно подменить исчезнувшую модель: другая модель имеет другую цену.
-    let selected = compatible.iter().copied().find(|m| m.id == requested);
+    let selected = catalog.iter().find(|model| model.id == requested);
+    let resolved_mode = draft.mode_for(kind, selected);
+    let mode = resolved_mode.unwrap_or(draft.mode);
+    let openrouter = selected.and_then(|model| model.openrouter.as_ref());
+    let tts_defaults = openrouter
+        .filter(|_| mode == GenMode::Speech)
+        .map(openrouter_tts_defaults);
+    if let Some((voice, format)) = &tts_defaults {
+        fill_tts_defaults(&mut params, voice.clone(), format.clone());
+    }
     let missing_model = !requested.is_empty() && selected.is_none() && catalogs.contains_key(&kind);
-    let video_limits = VideoLimits::for_model(&requested, mode);
+    let video_limits = (provider == Provider::CheaperInference)
+        .then(|| VideoLimits::for_model(&requested, mode))
+        .flatten();
     let price = selected
-        .filter(|_| video_limits.is_none_or(|limits| limits.supports(&params)))
+        .filter(|_| {
+            resolved_mode.is_some() && video_limits.is_none_or(|limits| limits.supports(&params))
+        })
         .and_then(|m| estimate_generation_price(m, &params, mode, &prompt));
     let audio_second_rate = selected
         .and_then(starting_rate)
         .filter(|(unit, _)| kind == MediaKind::Audio && *unit == PriceUnit::Second);
-    let needs_reference = matches!(
-        mode,
-        GenMode::ImageEdit | GenMode::ImageToVideo | GenMode::ReferenceToVideo
-    );
-    let attachment = uploads::file_mode(mode);
-    let quick = attachment.filter(|(target, _)| *target != mode);
-    let mut replace_first = use_signal(|| None::<String>);
-    let finish_files = use_callback(move |(urls, replace): (Vec<String>, bool)| {
-        let section = state.studio(kind);
-        let previous = section.active.peek().mode;
-        match uploads::accept_files(state, kind, draft, urls, replace) {
-            Ok(conflict) => {
-                replace_first.set(conflict);
-                if section.active.peek().mode != previous {
-                    focus_composer();
-                }
-            }
-            Err(key) => state.set_error(Some(tr(*state.lang.peek(), key).into())),
+    let attachment = uploads::file_mode(provider, kind, selected);
+    let multiple = selected.is_some_and(|model| uploads::allows_multiple(kind, model));
+    let finish_files = use_callback(move |(model_id, urls): (String, Vec<String>)| {
+        if state.settings.peek().provider != provider || *draft.model.peek() != model_id {
+            return;
+        }
+        let catalogs = state.models_by_kind.peek();
+        let Some(model) = catalogs
+            .get(&kind)
+            .and_then(|catalog| catalog.iter().find(|model| model.id == model_id))
+        else {
+            return;
+        };
+        if let Err(key) = uploads::accept_files(draft, kind, model, urls) {
+            state.set_error(Some(tr(*state.lang.peek(), key).into()));
         }
     });
-    let missing_reference = needs_reference && draft.references.read().is_empty();
-    let missing_duration = kind == MediaKind::Video
+    let missing_reference = resolved_mode.is_none() && attachment.is_some() && reference_count == 0;
+    let incompatible_references =
+        resolved_mode.is_none() && selected.is_some() && reference_count > 0;
+    let invalid_edit_references = mode == GenMode::ImageEdit
+        && reference_count > 0
+        && openrouter
+            .is_some_and(|options| !openrouter_edit_count(options).contains(&reference_count));
+    let invalid_speed = params.speed.is_some_and(|speed| {
+        openrouter
+            .and_then(|options| options.tts_parameters.get("speed"))
+            .is_some_and(|range| {
+                !speed.is_finite()
+                    || range
+                        .min
+                        .as_deref()
+                        .and_then(|min| min.parse::<f64>().ok())
+                        .is_some_and(|min| speed < min)
+                    || range
+                        .max
+                        .as_deref()
+                        .and_then(|max| max.parse::<f64>().ok())
+                        .is_some_and(|max| speed > max)
+            })
+    });
+    let missing_duration = provider == Provider::CheaperInference
+        && kind == MediaKind::Video
         && !params
             .duration_seconds
             .is_some_and(|d| d.is_finite() && d > 0.0);
@@ -187,26 +212,28 @@ fn StudioForm(kind: MediaKind, mut draft: StudioDraft) -> Element {
     let invalid_video_references =
         video_limits.is_some_and(|limits| !limits.supports_references(&draft.references.read()));
     let missing_folder = state.settings.read().local_folder.is_empty();
-    let limit = match (kind, mode) {
-        (MediaKind::Audio, _) => Some(4_096),
-        (_, GenMode::ImageEdit) => Some(32_000),
+    let limit = match (provider, kind, mode, requested.as_str()) {
+        (Provider::CheaperInference, MediaKind::Audio, _, _) => Some(4_096),
+        (Provider::CheaperInference, _, GenMode::ImageEdit, _) => Some(32_000),
+        (Provider::OpenRouter, MediaKind::Audio, _, "bytedance-seed/seed-audio-1-0") => Some(3_000),
         _ => None,
     };
     let count = prompt.chars().count();
     let too_long = limit.is_some_and(|max| count > max);
-    let running_mode = state.generating.read().get(&kind).copied();
-    let pending = running_mode == Some(mode);
+    let running_mode = state.generating.read().get(&(provider, kind)).copied();
+    let pending = running_mode.is_some_and(|running| kind != MediaKind::Audio || running == mode);
     let can_submit = selected.is_some()
+        && resolved_mode.is_some()
         && !prompt.trim().is_empty()
         && !too_long
-        && !missing_reference
         && !missing_duration
         && !invalid_video_params
         && !invalid_video_references
+        && !invalid_edit_references
+        && !invalid_speed
         && !missing_folder
         && running_mode.is_none()
         && !dropping()
-        && replace_first.read().is_none()
         && !state.media_locked();
     let prompt_label = if mode == GenMode::Speech {
         tr(lang, "studio.speech_text")
@@ -219,50 +246,58 @@ fn StudioForm(kind: MediaKind, mut draft: StudioDraft) -> Element {
         tr(lang, "common.generate")
     };
     let shortcut = state.settings.read().workspace.generation_shortcut;
+    let drop_model_id = requested.clone();
     let submit = use_callback(move |()| {
         if !can_submit
-            || state.settings.peek().provider != Provider::CheaperInference
+            || state.settings.peek().provider != provider
             || state.media_locked()
-            || state.generating.peek().contains_key(&kind)
+            || *dropping.peek()
+            || state.generating.peek().contains_key(&(provider, kind))
         {
             return;
         }
-        state.submit(draft.request(kind));
+        let catalogs = state.models_by_kind.peek();
+        let requested = draft.model.peek();
+        let selected = catalogs
+            .get(&kind)
+            .and_then(|catalog| catalog.iter().find(|model| model.id == *requested));
+        if draft.mode_for(kind, selected) != Some(mode) {
+            return;
+        }
+        let mut request = draft.request(kind, mode);
+        if let Some((voice, format)) = &tts_defaults {
+            fill_tts_defaults(&mut request.params, voice.clone(), format.clone());
+        }
+        state.submit(request);
     });
     rsx! {
         div { class: "studio-form",
-            div {class:"generator-editor",class:if quick.is_some(){"quick-attach"}else{""},class:if dragging(){"dragging"}else{""},
-                ondragover:move |e|{if attachment.is_some() && is_file_drag(&e){e.prevent_default();dragging.set(true);}},
+            div {class:"generator-editor",class:if dragging(){"dragging"}else{""},
+                ondragover:move |e|{
+                    if kind != MediaKind::Audio && is_file_drag(&e) {
+                        e.prevent_default();
+                        dragging.set(attachment.is_some() && !*dropping.peek());
+                    }
+                },
                 ondragleave:move |_|dragging.set(false),
                 ondrop:move |e|{
-                    let Some((target,file_kind))=attachment else{return;};
                     let files=e.data_transfer().files();
-                    if files.is_empty(){return;}
+                    if files.is_empty() || kind == MediaKind::Audio {return;}
                     e.prevent_default();dragging.set(false);
+                    let Some(file_kind)=attachment else{return;};
                     if *dropping.peek(){return;}
                     let Some(files)=files.iter().map(WebFileExt::get_web_file).collect::<Option<Vec<_>>>()
                         else {state.set_error(Some(tr(lang,"controls.upload_read").into()));return;};
+                    let model_id=drop_model_id.clone();
                     dropping.set(true);
                     spawn(async move{
-                        match read_batch(files,file_kind,target!=GenMode::ImageToVideo).await {
-                            Ok(urls)=>finish_files.call((urls,false)),
+                        match read_batch(files,file_kind,multiple).await {
+                            Ok(urls)=>finish_files.call((model_id,urls)),
                             Err(key)=>state.set_error(Some(tr(*state.lang.peek(),key).to_owned())),
                         }
                         dropping.set(false);
                     });
                 },
-             if needs_reference { StudioUploads { draft,reading:dropping } }
-             else if let Some((target,file_kind))=quick {
-                div {class:"generator-quick-attach",
-                    FilePicker {kind:file_kind,multiple:target!=GenMode::ImageToVideo,reading:dropping,
-                        label:tr(lang,if target==GenMode::ImageEdit{"studio.add_reference"}else{"gen.add_first_frame"}).to_owned(),
-                        described_by: "studio-quick-attachment-hint",
-                        on_load:move |urls|finish_files.call((urls,false))}
-                    p { id:"studio-quick-attachment-hint", class:"generator-attachment-hint",
-                        {tr(lang, if target==GenMode::ImageEdit {"gen.quick_image_hint"} else {"gen.quick_video_hint"})}
-                    }
-                }
-             }
             textarea {
                 class: "studio-prompt", id: "studio-prompt", rows: 2, aria_label: prompt_label,
                 value: "{prompt}", placeholder: prompt_hint(lang, mode),
@@ -272,18 +307,9 @@ fn StudioForm(kind: MediaKind, mut draft: StudioDraft) -> Element {
                     e.prevent_default();if !e.is_auto_repeating(){submit.call(());}
                 }},
             }
-            }
-            if replace_first.read().is_some(){
-                div {class:"generator-replace-first", role:"group",aria_label:tr(lang,"gen.replace_frame"),
-                    span {{tr(lang,"gen.frame_exists")}}
-                    button {r#type:"button",class:"btn",onclick:move |_|{
-                        let url=replace_first.write().take();
-                        if let Some(url)=url{finish_files.call((vec![url],true));}
-                    },{tr(lang,"gen.replace_frame")}}
-                    button {r#type:"button",class:"btn",
-                        onmounted:move |e|async move{let _=e.set_focus(true).await;},
-                        onclick:move |_|{replace_first.set(None);focus_composer();},{tr(lang,"history.cancel")}}
-                }
+             if kind != MediaKind::Audio {
+                StudioUploads { draft,kind,reading:dropping, selected:selected.cloned() }
+             }
             }
             if let Some(max) = limit {
                 p { class: if too_long { "status status-error" } else { "status status-muted" }, "{count} / {max}" }
@@ -291,10 +317,19 @@ fn StudioForm(kind: MediaKind, mut draft: StudioDraft) -> Element {
             div {class:"generator-toolbar",
              div { class: "studio-controls",
                 ModelDropdown {
-                    kind, mode, selected: requested,
-                    on_select: move |id| draft.select_model(id),
+                    kind, mode, reference_count, selected: requested,
+                    on_select: move |id: String| {
+                        let catalogs = state.models_by_kind.peek();
+                        if let Some(model) = catalogs.get(&kind).and_then(|catalog| catalog.iter().find(|model| model.id == id)) {
+                            draft.select_model_for_input(kind, model);
+                        }
+                    },
                 }
-                ParamChips { mode, model: selected.cloned(), params: params.clone(), on_change: move |params| draft.params.set(params) }
+                if let Some(options) = openrouter {
+                    OpenRouterChips { mode, model: options.clone(), params: params.clone(), on_change: move |params| draft.params.set(params) }
+                } else if provider == Provider::CheaperInference {
+                    ParamChips { mode, model: selected.cloned(), params: params.clone(), on_change: move |params| draft.params.set(params) }
+                }
              }
              div { class: "studio-submit",
                 if let Some(amount) = price {
@@ -311,6 +346,12 @@ fn StudioForm(kind: MediaKind, mut draft: StudioDraft) -> Element {
             if missing_model {
                 p { class: "status status-error", {tr(lang, "studio.model_gone")} }
             }
+            if missing_reference {
+                p { class: "status status-muted", {tr(lang, "controls.model_needs_references")} }
+            }
+            if incompatible_references {
+                p { class: "status status-error", {tr(lang, "controls.model_reference_limit")} }
+            }
             if missing_duration {
                 p { class: "status status-error", {tr(lang, "studio.duration_required")} }
             } else if invalid_video_params {
@@ -319,7 +360,16 @@ fn StudioForm(kind: MediaKind, mut draft: StudioDraft) -> Element {
             if invalid_video_references {
                 p { class: "status status-error", {tr(lang, "controls.veo_references")} }
             }
+            if invalid_edit_references {
+                p { class: "status status-error", {tr(lang, "controls.model_reference_limit")} }
+            }
+            if invalid_speed {
+                p { class: "status status-error", {tr(lang, "controls.or_invalid_speed")} }
+            }
             if compatible.is_empty() && !(state.busy)() {
+                if catalogs.contains_key(&kind) {
+                    p { class: "status status-muted", {tr(lang, "controls.no_models")} }
+                }
                 button {
                     r#type: "button", class: "btn", disabled: reloading(),
                     onclick: move |_| {
@@ -340,6 +390,42 @@ fn StudioForm(kind: MediaKind, mut draft: StudioDraft) -> Element {
     }
 }
 
+fn openrouter_edit_count(options: &OpenRouterModelOptions) -> std::ops::RangeInclusive<usize> {
+    let bounds = options.image_parameters.get("input_references");
+    let min = bounds
+        .and_then(|p| p.min.as_deref()?.parse::<usize>().ok())
+        .unwrap_or(1)
+        .max(1);
+    let max = bounds
+        .and_then(|p| p.max.as_deref()?.parse::<usize>().ok())
+        .unwrap_or(MAX_OPENROUTER_EDIT_SOURCES)
+        .min(MAX_OPENROUTER_EDIT_SOURCES);
+    min..=max
+}
+
+fn openrouter_tts_defaults(options: &OpenRouterModelOptions) -> (Option<String>, Option<String>) {
+    let voice = options
+        .tts_parameters
+        .get("voice")
+        .and_then(|p| p.values.first())
+        .cloned();
+    let format = options
+        .tts_parameters
+        .get("response_format")
+        .and_then(|p| {
+            ["mp3", "wav", "pcm"]
+                .into_iter()
+                .find(|supported| p.values.iter().any(|format| format == supported))
+        })
+        .map(str::to_owned);
+    (voice, format)
+}
+
+fn fill_tts_defaults(params: &mut GenParams, voice: Option<String>, format: Option<String>) {
+    params.voice = params.voice.take().or(voice);
+    params.response_format = params.response_format.take().or(format);
+}
+
 #[component]
 fn StudioResults(kind: MediaKind, provider: Provider) -> Element {
     let state = use_context::<AppState>();
@@ -347,9 +433,8 @@ fn StudioResults(kind: MediaKind, provider: Provider) -> Element {
     let mut playback = use_signal(|| (String::new(), 0u32));
     let history = state.history.read();
     let id = state.selected_result(kind);
-    let running =
-        provider == Provider::CheaperInference && state.generating.read().contains_key(&kind);
-    let submission_signal = state.studio(kind).last_submission;
+    let running = state.generating.read().contains_key(&(provider, kind));
+    let submission_signal = state.studio_for(provider, kind).last_submission;
     let submission = submission_signal.read();
     let selection = studio_results::select(
         &history,
@@ -359,34 +444,39 @@ fn StudioResults(kind: MediaKind, provider: Provider) -> Element {
         submission.as_ref(),
         running,
     );
-    let visible_id = selection.record().map(|r| r.id.clone());
+    let record = selection.record();
+    let visible_id = record.map(|r| r.id.clone());
+    let image_series = record.filter(|r| {
+        r.kind == MediaKind::Image && r.status == JobStatus::Completed && r.local_paths.len() > 1
+    });
     let single = state.settings.read().workspace.single_image;
     let reduced = state.settings.read().workspace.reduce_motion;
     let layout = move |value| {
-        let mut settings = state.settings.peek().clone();
-        if settings.workspace.single_image != value {
-            settings.workspace.single_image = value;
-            wasm_bindgen_futures::spawn_local(async move {
+        wasm_bindgen_futures::spawn_local(async move {
+            let mut settings = state.settings.peek().clone();
+            if settings.workspace.single_image != value {
+                settings.workspace.single_image = value;
                 let _ = state.persist_settings(settings).await;
-            });
-        }
+            }
+        });
     };
     let selected_play = playback.read();
     rsx! {
         section {class:"generator-results",
             header {class:"generator-feed-heading",h2 {{tr(lang,"gen.results")}}
-                if kind==MediaKind::Image {
-                    div {class:"generator-view-mode",role:"group",aria_label:tr(lang,"gen.results"),
+                if let Some(series) = image_series {
+                    div {class:"generator-view-mode",role:"group",aria_label:tr(lang,"gen.view_mode"),
                         for (value,key,icon) in [(false,"gen.grid","layers"),(true,"gen.one","expand")] {
                             button {key:"{key}",r#type:"button",class:"generator-icon-button", title:tr(lang,key),aria_label:tr(lang,key),
-                                aria_pressed:"{single==value}",onclick:move |_|layout(value),
+                                aria_pressed:single == value,aria_controls:"generator-output-{series.id}",
+                                onclick:move |_|layout(value),
                                 span {class:"studio-icon","data-icon":icon,aria_hidden:"true"}
                             }
                         }
                     }
                 }
             }
-            if let Some(record)=selection.record() {
+            if let Some(record)=record {
                 ResultCard {key:"{record.id}",id:record.id.clone(),single,
                     play:if selected_play.0==record.id{selected_play.1}else{0},
                     current:matches!(selection,StudioResult::Submitted(_)), running, reduced}
@@ -458,17 +548,19 @@ fn ResultCard(
         .or(params.response_format.as_deref());
     let status = record.status;
     let provider = record.provider;
-    let editable = provider == Provider::CheaperInference;
+    let editable = provider == state.settings.read().provider;
     let pending_check = editable && state.media_idle() && status == JobStatus::Pending;
     rsx! {
       article {class:"generator-run","data-run-id":id.clone(),"data-result-origin":if current{"submission"}else{"history"},
-        div {class:"generator-output",
+        div {class:"generator-output",id:"generator-output-{id}",
             match status {
                 JobStatus::Completed=>rsx!{MediaSeries {key:"{id}-{play}", id:id.clone(),kind:record.kind,paths:record.local_paths.clone(),prompt:record.prompt.clone(),
                     single, aspect:image_aspect(&params),reference:editable,play:play>0 } },
                 JobStatus::Pending=>rsx!{
                     WaitPanel {running:running&&current,reduced}
-                    if let Some(reason)=record.error.as_deref(){p {class:"status-muted", {km_ui_core::studio::pending_reason(lang,reason)} }}
+                    if let Some(reason)=&record.error {
+                        div { class:"status-muted", ErrorNotice { message:reason.clone() } }
+                    }
                     if pending_check {button {class:"btn",r#type:"button",onclick:move |_|state.check_pending(), {tr(lang,"studio.check_result")} }}
                 },
                 JobStatus::Failed=>rsx!{FailureCard {provider,model:record.model.clone(),mode:record.mode,current,
@@ -527,6 +619,20 @@ fn FailureCard(
 ) -> Element {
     let state = use_context::<AppState>();
     let lang = (state.lang)();
+    let explanation = diagnostic
+        .as_deref()
+        .and_then(|message| localize_error(lang, message))
+        .unwrap_or_else(|| {
+            tr(
+                lang,
+                if diagnostic.is_none() && before_record {
+                    "gen.no_receipt"
+                } else {
+                    studio_results::failure_explanation(diagnostic.as_deref())
+                },
+            )
+            .into()
+        });
     rsx! {
         div {class:"generator-result-failure",role:"status","data-error-origin":if current{"submission"}else{"history"},
             strong { {tr(lang,if current{"gen.failure.sent"}else{"gen.failure.stored"})} }
@@ -534,11 +640,10 @@ fn FailureCard(
                 span { {provider.name()} } span {"{model}"} span {{tab_label(lang,mode)}}
                 time {{display_timestamp(created,lang)}}
             }
-            p { {tr(lang,if diagnostic.is_none()&&before_record{"gen.no_receipt"}
-                else{studio_results::failure_explanation(diagnostic.as_deref())})} }
-            if let Some(id)=request_id { p {class:"generator-failure-id","Request ID: " code {"{id}"} } }
-            if let Some(message)=diagnostic.filter(|s|!s.is_empty()) {
-                details {open:before_record||message.len()<=320,summary {{tr(lang,"gen.failure.diagnostic")}} pre {"{message}"}}
+            p { "{explanation}" }
+            if let Some(id)=request_id { p {class:"generator-failure-id",{tr(lang,"gen.request_id")} " " code {"{id}"} } }
+            if let Some(message)=diagnostic.as_deref().filter(|s|!s.is_empty()) {
+                details {summary {{tr(lang,"gen.failure.diagnostic")}} pre {translate:"no","{message}"}}
             }
         }
     }

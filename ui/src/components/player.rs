@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 use dioxus::web::WebEventExt;
-use km_shared::{GenMode, HistoryRecord, JobStatus, Lang, MediaKind, Provider};
+use km_shared::{CatalogModel, GenMode, HistoryRecord, JobStatus, Lang, MediaKind};
 use km_ui_core::format::{format_local_date_at, format_usd};
 use km_ui_core::i18n::tr;
 use wasm_bindgen::{JsCast, JsValue};
@@ -12,9 +12,11 @@ use web_sys::{
     OfflineAudioContext, Response,
 };
 
+use crate::components::error_notice::ErrorNotice;
 use crate::ipc;
 use crate::router::Route;
-use crate::state::{AppState, use_t};
+use crate::screens::uploads::accept_files;
+use crate::state::{AppState, StudioDraft, use_t};
 
 thread_local! {
     static PLAYING: std::cell::RefCell<Option<HtmlMediaElement>> = const { std::cell::RefCell::new(None) };
@@ -105,12 +107,21 @@ pub fn ResultViewer(record: HistoryRecord, #[props(default)] in_history: bool) -
             match record.status {
                 JobStatus::Pending => rsx! {
                     p { class: "muted", {pending} }
-                    if let Some(reason) = record.error.as_deref() {
-                        p { class: "status-error", {km_ui_core::studio::pending_reason((state.lang)(), reason)} }
+                    if let Some(reason) = &record.error {
+                        div { class: "status-error", ErrorNotice { message: reason.clone() } }
+                    }
+                    if state.media_idle() {
+                        button { class: "btn", r#type: "button", onclick: move |_| state.check_pending(),
+                            {tr((state.lang)(), "studio.check_result")}
+                        }
                     }
                 },
                 JobStatus::Failed => rsx! {
-                    p { class: "status-error", {record.error.as_deref().unwrap_or(failed)} }
+                    if let Some(reason) = &record.error {
+                        div { class: "status-error", ErrorNotice { message: reason.clone() } }
+                    } else {
+                        p { class: "status-error", {failed} }
+                    }
                 },
                 JobStatus::Completed if record.local_paths.is_empty() => rsx! {
                     p { class: "muted", {no_file} }
@@ -118,7 +129,7 @@ pub fn ResultViewer(record: HistoryRecord, #[props(default)] in_history: bool) -
                 JobStatus::Completed => rsx! {
                     MediaSeries { key: "{record.id}", id: record.id.clone(), paths: record.local_paths.clone(),
                         kind: record.kind, prompt: record.prompt.clone(), single: false,
-                        reference: record.provider == Provider::CheaperInference && state.settings.read().provider == record.provider }
+                        reference: state.settings.read().provider == record.provider }
                 },
             }
             if !in_history && record.status != JobStatus::Pending {
@@ -129,6 +140,19 @@ pub fn ResultViewer(record: HistoryRecord, #[props(default)] in_history: bool) -
 }
 
 /// Файл для формы выдаёт нативная команда по идентификатору серии и порядковому номеру.
+fn reference_model(state: AppState, draft: StudioDraft) -> Option<CatalogModel> {
+    let selected = draft.model.read();
+    let catalog = state.models_by_kind.read();
+    catalog
+        .get(&MediaKind::Image)?
+        .iter()
+        .find(|model| {
+            (selected.is_empty() || model.id == *selected)
+                && model.supports_mode(GenMode::ImageEdit)
+        })
+        .cloned()
+}
+
 #[component]
 fn ReferenceAction(
     id: String,
@@ -139,24 +163,32 @@ fn ReferenceAction(
     let nav = use_navigator();
     let mut loading = use_signal(|| false);
     let label = use_t("gen.use");
+    let unavailable = use_t("controls.model_no_references");
+    let draft = (state
+        .studio_for(state.settings.read().provider, MediaKind::Image)
+        .active)();
+    let can_attach = reference_model(state, draft).is_some();
     rsx! { button {
-        class: "btn media-reference", r#type: "button", disabled: loading(), title: label,
+        class: "btn media-reference", r#type: "button", disabled: loading() || !can_attach,
+        title: if can_attach { label } else { unavailable },
         onclick: move |_| {
-            if *loading.peek() { return; }
+            if *loading.peek() || !can_attach { return; }
             loading.set(true);
             let id = id.clone();
+            let provider = state.settings.peek().provider;
             spawn(async move {
                 let result = ipc::result_reference(&id,index).await.and_then(|url| {
-                    if state.settings.peek().provider != Provider::CheaperInference { return Ok(false); }
-                    let mut section = state.studio(MediaKind::Image);
-                    let draft = section.drafts.read().iter().find(|d| d.mode == GenMode::ImageEdit).copied();
-                    if let Some(draft) = draft {
-                        crate::components::upload::attach_edit_source(draft, url)
-                            .map_err(|key| tr(*state.lang.peek(),key).to_owned())?;
-                        section.active.set(draft);
-                        return Ok(true);
+                    if state.settings.peek().provider != provider { return Ok(false); }
+                    let draft = *state.studio(MediaKind::Image).active.peek();
+                    let lang = *state.lang.peek();
+                    let model = reference_model(state, draft)
+                        .ok_or_else(|| tr(lang, "controls.model_no_references").to_owned())?;
+                    if draft.model.peek().is_empty() {
+                        draft.select_model_for_input(MediaKind::Image, &model);
                     }
-                    Ok(false)
+                    accept_files(draft, MediaKind::Image, &model, vec![url])
+                        .map_err(|key| tr(lang, key).to_owned())?;
+                    Ok(true)
                 });
                 match result {
                     Ok(true) => { if let Some(done) = after { done.call(()); } nav.push(Route::Studio {kind:"image".into()}); }

@@ -2,7 +2,7 @@
 
 use km_shared::{
     AppEvent, Billing, GenMode, GenParams, Generation, GenerationRequest, HistoryRecord,
-    ImageResponse, JobStatus, Lang, MediaKind, Settings, Theme, VideoResponse,
+    ImageResponse, JobStatus, Lang, LangPreference, MediaKind, Settings, Theme, VideoResponse,
 };
 
 #[test]
@@ -223,7 +223,7 @@ fn settings_round_trip_lowercase_enums() {
         serde_json::from_str(json).expect("настройки должны десериализоваться");
 
     assert_eq!(settings.local_folder, "/media/km");
-    assert_eq!(settings.lang, Lang::Ru);
+    assert_eq!(settings.lang, LangPreference::Ru);
     assert_eq!(settings.theme, Theme::System);
     assert!(settings.show_real_balance);
     assert_eq!(settings.provider, km_shared::Provider::CheaperInference);
@@ -235,4 +235,33 @@ fn settings_round_trip_lowercase_enums() {
     let back: Settings =
         serde_json::from_value(value).expect("обратная десериализация должна работать");
     assert_eq!(back, settings, "round-trip настроек");
+}
+
+#[test]
+fn system_language_follows_the_primary_locale_with_english_fallback() {
+    for (locale, expected) in [
+        ("ru", Lang::Ru),
+        ("ru-RU", Lang::Ru),
+        ("RU_BY.UTF-8", Lang::Ru),
+        ("en-RU", Lang::En),
+        ("en-US", Lang::En),
+        ("de-DE", Lang::En),
+        ("", Lang::En),
+    ] {
+        assert_eq!(
+            LangPreference::System.resolve(Lang::from_locale(locale)),
+            expected
+        );
+    }
+    assert_eq!(LangPreference::En.resolve(Lang::Ru), Lang::En);
+    assert_eq!(LangPreference::Ru.resolve(Lang::En), Lang::Ru);
+}
+
+#[test]
+fn settings_default_to_system_language() {
+    let legacy = r#"{"local_folder":"","theme":"light","show_real_balance":false}"#;
+    let settings: Settings = serde_json::from_str(legacy).unwrap();
+    assert_eq!(settings.lang, LangPreference::System);
+    assert_eq!(Settings::default().lang, LangPreference::System);
+    assert_eq!(serde_json::to_value(settings).unwrap()["lang"], "system");
 }

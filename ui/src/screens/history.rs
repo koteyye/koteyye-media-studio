@@ -150,13 +150,14 @@ fn EntryActions(
     rsx! {
         div {class:"history-actions",
             if !expanded && let Some(path)=path {FileActions {path,compact:true}}
-            button {r#type:"button",class:"btn",disabled:provider!=Provider::CheaperInference,aria_label:"{repeat_label}",title:"{repeat_label}",
+            button {r#type:"button",class:"btn",disabled:active != provider && !state.media_idle(),aria_label:"{repeat_label}",title:"{repeat_label}",
                 onclick:move |_| {
                     // В истории может быть большой референс. Весь запрос копируем только по явному действию.
                     let record=state.history.peek().iter().find(|r|r.id==repeat_id).cloned();
                     if let Some(record)=record {
                         spawn(async move {
                             if state.settings.peek().provider!=record.provider {
+                                if !state.media_idle() {return;}
                                 let mut next=state.settings.peek().clone();next.provider=record.provider;
                                 if state.persist_settings(next).await.is_err() {return;}
                             }

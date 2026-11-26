@@ -75,24 +75,38 @@ impl AppState {
         drop(self.queue_settings(next));
     }
 
-    fn draft_choices(self) -> HashMap<GenMode, ModelChoice> {
-        let mut choices = HashMap::new();
-        for section in self.studio {
-            for draft in section.drafts.read().iter().copied() {
-                if let Some(choice) = draft.saved_choice() {
-                    choices.insert(draft.mode, choice);
+    fn draft_choices(self) -> [HashMap<GenMode, ModelChoice>; 2] {
+        self.studio.map(|sections| {
+            let mut choices = HashMap::new();
+            for section in sections {
+                for draft in section.drafts.read().iter().copied() {
+                    if let Some(choice) = draft.saved_choice() {
+                        choices.insert(draft.mode, choice);
+                    }
                 }
             }
-        }
-        choices
+            choices
+        })
     }
 
     pub(super) fn load_choices(mut self, settings: &Settings) {
         if settings.workspace.remember_models {
-            for section in self.studio {
-                for draft in section.drafts.read().iter().copied() {
-                    if let Some(choice) = settings.workspace.model_choices.get(&draft.mode) {
-                        draft.apply_choice(choice);
+            for (sections, choices) in self.studio.into_iter().zip([
+                &settings.workspace.model_choices,
+                &settings.workspace.openrouter_model_choices,
+            ]) {
+                for section in sections {
+                    for draft in section.drafts.read().iter().copied() {
+                        let choice = choices.get(&draft.mode).or_else(|| match draft.mode {
+                            GenMode::TextToImage => choices.get(&GenMode::ImageEdit),
+                            GenMode::TextToVideo => choices
+                                .get(&GenMode::ImageToVideo)
+                                .or_else(|| choices.get(&GenMode::ReferenceToVideo)),
+                            _ => None,
+                        });
+                        if let Some(choice) = choice {
+                            draft.apply_choice(choice);
+                        }
                     }
                 }
             }
@@ -118,8 +132,12 @@ impl AppState {
         }
         self.observed_choices.set(Some(choices.clone()));
         let mut next = self.settings.peek().clone();
-        if next.workspace.model_choices != choices {
-            next.workspace.model_choices = choices;
+        let [ci, openrouter] = choices;
+        if next.workspace.model_choices != ci
+            || next.workspace.openrouter_model_choices != openrouter
+        {
+            next.workspace.model_choices = ci;
+            next.workspace.openrouter_model_choices = openrouter;
             drop(self.queue_settings(next));
         }
     }

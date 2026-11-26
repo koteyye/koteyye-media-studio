@@ -5,11 +5,18 @@
 //! незавершённые генерации. События ядра уходят в окно через [`tauri::Emitter`]
 //! с именами [`commands::event_name`] и payload — serde [`km_shared::AppEvent`].
 
+mod cli;
 pub mod commands;
 pub mod keychain;
+mod mcp;
+#[cfg(target_os = "macos")]
+mod native_menu;
 pub mod result_reference;
 pub mod state;
 mod updates;
+
+pub use cli::run_mcp_server;
+pub use mcp::run_stdio;
 
 use std::sync::Arc;
 
@@ -22,6 +29,7 @@ use crate::state::AppState;
 
 /// Базовый URL API Cheaper Inference (продакшен).
 const CI_BASE_URL: &str = "https://api.cheaperinference.com";
+const APP_IDENTIFIER: &str = "ru.koteyye.media-studio";
 
 /// Имя файла SQLite в `app_data_dir`.
 const DB_FILE: &str = "history.db";
@@ -96,8 +104,14 @@ pub fn run() {
             )?);
             if let Ok(settings) = state.storage.get_settings() {
                 apply_native_theme(app.handle(), settings.theme);
+                #[cfg(target_os = "macos")]
+                native_menu::apply(app.handle(), settings.lang);
             }
             app.manage(Arc::clone(&state));
+            let mcp_state = Arc::clone(&state);
+            tauri::async_runtime::spawn(async move {
+                mcp_state.mcp.restore(&mcp_state).await;
+            });
 
             // Восстановление незавершённых генераций — фоном, не блокируя запуск.
             // Та же команда зовётся из UI (load); проходы сериализованы локом
@@ -111,11 +125,13 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_settings,
+            commands::system_language,
             commands::set_settings,
             commands::set_api_key,
             commands::provider_has_key,
             commands::set_provider_key,
             commands::check_provider_key,
+            commands::open_provider_api_keys,
             commands::test_connection,
             commands::fetch_models,
             commands::generate,
@@ -124,6 +140,10 @@ pub fn run() {
             commands::delete_history,
             commands::recover_pending,
             commands::fetch_balance,
+            mcp::mcp_status,
+            mcp::mcp_set_enabled,
+            mcp::mcp_rotate_token,
+            mcp::mcp_set_model_default,
             commands::pick_folder,
             commands::open_file,
             commands::show_in_folder,
