@@ -1,93 +1,30 @@
 <p align="center">
-  <img src="ui/assets/icons/koteyye_media_studio_logo.png" width="128" alt="Koteyye Media Studio v2" />
+  <img src="ui/assets/icons/koteyye_media_studio_logo.png" width="128" alt="Koteyye Media Studio logo" />
 </p>
 
 # Koteyye Media Studio v2
 
-Десктопная студия AI-генерации медиа на **Tauri 2 + Rust**. Студия создаёт
-изображения, видео и аудио через Cheaper Inference или OpenRouter и сохраняет результаты локально.
-В «Настройки → Подключение» у Cheaper Inference и OpenRouter отдельные профили.
-Там можно проверить, сохранить, заменить или удалить ключ выбранного сервиса.
-Ключи хранятся в системном хранилище. Доступные модели и параметры зависят от выбранного провайдера.
+[Русская версия](readme_ru.md)
 
-## Возможности
+Koteyye Media Studio is a desktop app for working with AI media models from
+**Cheaper Inference** and **OpenRouter**. Generate images, video, speech, music,
+and sound effects in one app and save the results locally. You can connect both
+providers and choose which one to use in the studio.
 
-- **Изображения** — генерация по тексту и редактирование по референсам. В Cheaper Inference можно загрузить PNG-маску.
-- **Видео** — text-to-video, image-to-video (первый кадр), reference-to-video.
-- **Аудио** — озвучка (выбор голоса), музыка, звуковые эффекты.
-- **Локальное сохранение** — студия пишет готовые файлы в выбранную папку.
-- **Недавние работы** есть в каждом разделе. Кадр открывается целиком, видео и аудио можно воспроизвести в студии. Из истории можно вернуть запрос с параметрами и использовать готовое изображение как референс.
-- **История** хранит провайдера, статус, стоимость и пути к файлам в SQLite. Поиск по промпту и модели открывается клавишей `/`.
-- **Восстановление** — студия использует сохранённый идентификатор, чтобы забрать
-  результат из Cheaper Inference или продолжить проверять статус видео в OpenRouter.
-  Изображения и аудио OpenRouter сохраняются при получении ответа.
-- **Расход и баланс** — локальный расход считается по истории выбранного провайдера. В настройках можно отдельно показать доступные средства аккаунта. Cheaper Inference требует право `account:read`, OpenRouter предоставляет баланс аккаунта ключам управления. [Проверка баланса OpenRouter](https://openrouter.ai/docs/api/api-reference/credits/get-remaining-credits)
-- **Интерфейс** поддерживает русский и английский, светлую, тёмную и системную тему. По умолчанию язык берётся из системы, а для остальных системных локалей используется английский. Язык можно выбрать при первом запуске и в настройках. Можно настроить стартовый раздел, плотность, анимацию, раскладку результатов и число недавних работ. По умолчанию студия запоминает модель и формат отдельно для каждого режима.
+Add your API keys in **Settings → Connection**. Available models depend on the
+provider.
 
-## Локальный запуск
+## Connect an agent via MCP
 
-Для разработки нужны Rust stable, цель `wasm32-unknown-unknown`, Tauri CLI 2 и
-Dioxus CLI 0.7.10. На Windows также используются MSVC, Windows SDK и WebView2.
-Из корня репозитория:
+Enable the local server in **Settings → MCP**, then copy the connection prompt
+into your agent development environment (ADE). The agent can browse models,
+generate media, and retrieve the generated files through the studio.
 
-```sh
-cargo tauri dev
-```
+The server runs at `http://127.0.0.1:29731/mcp`. The connection prompt includes
+instructions for Streamable HTTP and stdio clients. Keep the MCP token private
+because it grants access to generation, including paid requests.
 
-При первом запуске ключ и выбор папки можно пропустить, чтобы посмотреть
-интерфейс и публичный каталог. Для генерации выбери провайдера, укажи его ключ и
-папку сохранения в настройках. Проектные тесты запускаются командой
-`cargo test --workspace --locked`.
+## Run from source
 
-## Подключение ADE через MCP
-
-Включи сервер в **Настройки → MCP** и скопируй промпт подключения для агента.
-Сервер работает на том же компьютере по адресу `http://127.0.0.1:29731/mcp`.
-Промпт содержит конфигурацию Streamable HTTP и команду для клиентов со stdio.
-Студия должна оставаться открытой. Токен MCP даёт доступ к генерации через активный
-профиль, включая платные запросы.
-
-Агент получает [навык работы со студией](skills/media-studio/SKILL.md) как
-MCP-ресурс, через промпт `use_media_studio` или инструмент `get_studio_skill`.
-Инструменты позволяют посмотреть каталог и историю, запустить генерацию и
-получить её статус и локальные пути к файлам по ID. Вызов `studio_status` проверяет
-подключение без генерации.
-
-В настройках MCP можно закрепить модель для каждого режима генерации отдельно
-для Cheaper Inference и OpenRouter. В режиме «Авто» агент выбирает модель из каталога.
-Настройка применяется к вызовам MCP.
-
-### Запуск MCP из терминала
-
-Консольная команда поднимает тот же локальный сервер без окна студии.
-Она использует сохранённый профиль, системное хранилище ключей, папку выдачи,
-историю и модели по умолчанию. Сервер работает в терминале до Ctrl+C.
-
-В установленном приложении CLI лежит рядом с основным исполняемым файлом
-(`Contents/MacOS/koteyye-media-studio-cli` внутри `.app` на macOS,
-`koteyye-media-studio-cli.exe` в папке установки Windows).
-
-```sh
-koteyye-media-studio-cli mcp serve
-```
-
-Для сборки из исходников можно запустить эту же команду через Cargo.
-
-```sh
-cargo run -p koteyye-media-studio --bin koteyye-media-studio-cli -- mcp serve
-```
-
-Флаг `--show-token` выводит токен для подключения агента. Для клиента stdio
-используй команду `koteyye-media-studio-cli mcp stdio` и передай токен через
-`KOTEYYE_MCP_TOKEN`. Оба способа подключаются к локальному серверу на порту 29731.
-
-## Структура
-
-- `crates/km-shared` — типы запросов/ответов CI, история, события, настройки.
-- `crates/km-core` — HTTP-клиенты провайдеров, генерация, файлы, SQLite, оркестратор джобов.
-- `src-tauri` — оболочка Tauri 2: команды, события, keychain.
-- `crates/km-ui-core` — режимы, параметры, оценки стоимости, переводы и темы.
-- `ui` — Dioxus-интерфейс (WASM), студия изображений, видео и аудио, история и настройки.
-
----
-© 2026 [Koteyye Eco System](https://kotey-ye.ru)
+Install Rust stable with the `wasm32-unknown-unknown` target, Tauri CLI 2, and
+Dioxus CLI 0.7.10. Run `cargo tauri dev` from the repository root.
